@@ -61,19 +61,51 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
     attributesCached?: boolean, // Whether node attributes have not changed.
     cssText?: string, // Text for stylesheets.
     cssRef?: number, // Previous snapshotNumber for overridden stylesheets.
+
+    // The fields below are for nodes only.
+    historyEpoch?: number, // The data of a node is valid only in the same history epoch.
+    dirtyEpoch?: number, // The node or a node in its subtree changed in this mark epoch.
+    insertedEpoch?: number, // The node was inserted in this mark epoch, visit its full subtree.
+    volatileValues?: any[], // Values that can change without a DOM mutation, see _volatileValues().
+    scroll?: string, // Scroll offsets of a scroll candidate.
+    adoptedStyleSheets?: CSSStyleSheet[], // For documentElement and shadow roots.
   };
 
-  function resetCachedData(obj: any) {
-    delete obj[kCachedData];
-  }
-
+  // Use for style sheets.
   function ensureCachedData(obj: any): CachedData {
     if (!obj[kCachedData])
       obj[kCachedData] = {};
     return obj[kCachedData];
   }
 
-  const kObserverConfig: MutationObserverInit = { attributes: true, subtree: true };
+  // Use for nodes. resetHistory() increments the epoch, which makes all node data invalid.
+  let historyEpoch = 0;
+
+  function nodeData(node: Node): CachedData | undefined {
+    const data = (node as any)[kCachedData] as CachedData | undefined;
+    return data?.historyEpoch === historyEpoch ? data : undefined;
+  }
+
+  function ensureNodeData(node: Node): CachedData {
+    let data = nodeData(node);
+    if (!data) {
+      data = { historyEpoch };
+      (node as any)[kCachedData] = data;
+    }
+    return data;
+  }
+
+  function arraysEqual(a: any[] | undefined, b: any[]) {
+    if (!a || a.length !== b.length)
+      return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i])
+        return false;
+    }
+    return true;
+  }
+
+  const kObserverConfig: MutationObserverInit = { attributes: true, childList: true, characterData: true, subtree: true };
 
   function removeHash(url: string) {
     try {
@@ -97,6 +129,24 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
     private _nativeShadowRoot: typeof ShadowRoot;
     private _nativeFirstChild: (this: Node) => Node | null;
     private _nativeNextSibling: (this: Node) => Node | null;
+
+    // A snapshot visits only the nodes that are marked as dirty in the current mark epoch,
+    // and their ancestors. Other nodes are the same as in the previous snapshot.
+    private _markEpoch = 1;
+    // Elements with state that can change without a DOM mutation, for example an input value.
+    private _volatileElements = new Set<Element>();
+    // Elements that can have scroll offsets.
+    private _scrollCandidates = new Set<Element>();
+    private _customElements = new Set<Element>();
+    private _shadowRoots = new Set<ShadowRoot>();
+    private _markedTargets = new Set<Element>();
+    private _lastBaseURI: string | undefined;
+    private _onScroll = (event: Event) => {
+      const target = event.target as Node | null;
+      const element = target?.nodeType === Node.DOCUMENT_NODE ? (target as Document).scrollingElement : target;
+      if (element?.nodeType === Node.ELEMENT_NODE)
+        this._scrollCandidates.add(element as Element);
+    };
 
     constructor() {
       // Some pages overwrite the following native functions, so capture them in advance.
@@ -123,6 +173,8 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
           this._invalidateStyleSheet(sheet as CSSStyleSheet);
       });
       this._interceptNativeAsyncMethod(window.CSSStyleSheet.prototype, 'replace', (sheet: CSSStyleSheet) => this._invalidateStyleSheet(sheet));
+      // A new shadow root is not a DOM mutation.
+      this._interceptNativeMethod(window.Element.prototype, 'attachShadow', (element: Element) => this._markDirty(element));
 
       this._fakeBase = document.createElement('base');
 
@@ -162,10 +214,29 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
         if (target?.nodeType !== Node.ELEMENT_NODE)
           return;
         (target as any).__playwright_target__ = this._targetGeneration;
+        this._markedTargets.add(target);
+        this._markDirty(target);
       });
-      (document as any).addEventListener('__playwright_reset_targets__', () => {
-        ++this._targetGeneration;
-      });
+      (document as any).addEventListener('__playwright_reset_targets__', () => this._resetTargets());
+      document.addEventListener('scroll', this._onScroll, { capture: true, passive: true });
+    }
+
+    private _resetTargets() {
+      ++this._targetGeneration;
+      for (const target of this._markedTargets)
+        this._markDirty(target);
+      this._markedTargets.clear();
+    }
+
+    // Marks the node and its ancestors, so that the next snapshot visits them.
+    private _markDirty(node: Node) {
+      for (let n: Node | null = node; n; n = n.parentNode || (n.nodeType === Node.DOCUMENT_FRAGMENT_NODE ? (n as ShadowRoot).host : null)) {
+        const data = ensureNodeData(n);
+        // The ancestors are already marked in this epoch.
+        if (data.dirtyEpoch === this._markEpoch)
+          return;
+        data.dirtyEpoch = this._markEpoch;
+      }
     }
 
     private _shadowRoot(element: Element): ShadowRoot | null {
@@ -221,8 +292,17 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
     }
 
     private _handleMutations(list: MutationRecord[]) {
-      for (const mutation of list)
-        ensureCachedData(mutation.target).attributesCached = undefined;
+      for (const mutation of list) {
+        if (mutation.type === 'attributes') {
+          ensureNodeData(mutation.target).attributesCached = undefined;
+        } else if (mutation.type === 'childList') {
+          // The inserted subtree can have changed while it was not observed, for example
+          // when it was not in the document.
+          for (const node of mutation.addedNodes)
+            ensureNodeData(node).insertedEpoch = this._markEpoch;
+        }
+        this._markDirty(mutation.target);
+      }
     }
 
     private _ensureObservingCurrentDocument() {
@@ -236,6 +316,8 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
       this._observer.disconnect();
       this._observer.observe(document, kObserverConfig);
       this._refreshListenersWhenNeeded();
+      // The tracked elements and shadow roots are from the old document.
+      this.resetHistory();
     }
 
     private _invalidateStyleSheet(sheet: CSSStyleSheet) {
@@ -278,23 +360,143 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
 
     markIframe(iframeElement: HTMLIFrameElement | HTMLFrameElement, frameId: string) {
       (iframeElement as any)[kSnapshotFrameId] = frameId;
+      this._markDirty(iframeElement);
     }
 
     resetHistory() {
       this._staleStyleSheets.clear();
+      // All node data becomes invalid, so the next snapshot visits all nodes again.
+      ++historyEpoch;
+      // The next snapshot adds the elements and shadow roots again.
+      this._volatileElements.clear();
+      this._scrollCandidates.clear();
+      this._customElements.clear();
+      this._shadowRoots.clear();
+      this._lastBaseURI = undefined;
+    }
 
-      const visitNode = (node: Node | ShadowRoot) => {
-        resetCachedData(node);
-        if (node.nodeType === Node.ELEMENT_NODE) {
-          const shadowRoot = this._shadowRoot(node as Element);
-          if (shadowRoot)
-            visitNode(shadowRoot);
+    private _trackShadowRoot(shadowRoot: ShadowRoot) {
+      if (this._shadowRoots.has(shadowRoot))
+        return;
+      this._shadowRoots.add(shadowRoot);
+      // The document observer and listeners do not see changes and events in shadow roots.
+      this._observer.observe(shadowRoot, kObserverConfig);
+      shadowRoot.addEventListener('scroll', this._onScroll, { capture: true, passive: true });
+    }
+
+    private _isVolatileElement(element: Element, nodeName: string): boolean {
+      return nodeName === 'INPUT' || nodeName === 'TEXTAREA' || nodeName === 'OPTION' ||
+          nodeName === 'CANVAS' || nodeName === 'IFRAME' || nodeName === 'FRAME' || nodeName === 'IMG' ||
+          !!(element as HTMLElement).popover;
+    }
+
+    // Values in the snapshot that can change without a DOM mutation.
+    // These must be the same values that captureSnapshot() reads for the element.
+    private _volatileValues(element: Element, nodeName: string): any[] {
+      const values: any[] = [];
+      if (nodeName === 'INPUT' || nodeName === 'TEXTAREA')
+        values.push((element as HTMLInputElement).value);
+      if (nodeName === 'INPUT')
+        values.push((element as HTMLInputElement).type, (element as HTMLInputElement).checked);
+      if (nodeName === 'OPTION')
+        values.push((element as HTMLOptionElement).selected);
+      if (nodeName === 'CANVAS' || nodeName === 'IFRAME' || nodeName === 'FRAME')
+        values.push(this._boundingRect(element));
+      if ((element as HTMLElement).popover)
+        values.push(!!(element as HTMLElement).matches?.(':popover-open'));
+      if (nodeName === 'IMG')
+        values.push((element as HTMLImageElement).currentSrc);
+      return values;
+    }
+
+    private _boundingRect(element: Element): string {
+      const boundingRect = element.getBoundingClientRect();
+      return JSON.stringify({
+        left: boundingRect.left,
+        top: boundingRect.top,
+        right: boundingRect.right,
+        bottom: boundingRect.bottom
+      });
+    }
+
+    // Marks the nodes with changes that a MutationObserver does not report.
+    private _markChangesWithoutMutations() {
+      for (const element of this._volatileElements) {
+        if (!element.isConnected) {
+          this._volatileElements.delete(element);
+          continue;
         }
-        for (let child = this._nativeFirstChild.call(node); child; child = this._nativeNextSibling.call(child))
-          visitNode(child);
-      };
-      visitNode(document.documentElement);
-      visitNode(this._fakeBase);
+        if (!arraysEqual(nodeData(element)?.volatileValues, this._volatileValues(element, element.nodeName)))
+          this._markDirty(element);
+      }
+
+      const scrollingElement = document.scrollingElement;
+      if (scrollingElement)
+        this._scrollCandidates.add(scrollingElement);
+      for (const element of this._scrollCandidates) {
+        if (!element.isConnected) {
+          this._scrollCandidates.delete(element);
+          continue;
+        }
+        if (nodeData(element)?.scroll !== element.scrollTop + ',' + element.scrollLeft)
+          this._markDirty(element);
+      }
+
+      // The list of defined custom elements is an attribute of the body.
+      // It changes when an element is removed or when a custom element is defined.
+      if (this._customElements.size && document.body)
+        this._markDirty(document.body);
+
+      if (document.documentElement)
+        this._markChangedAdoptedStyleSheets(document, document.documentElement);
+      for (const shadowRoot of this._shadowRoots) {
+        if (!shadowRoot.host.isConnected) {
+          this._shadowRoots.delete(shadowRoot);
+          continue;
+        }
+        this._markChangedAdoptedStyleSheets(shadowRoot, shadowRoot);
+      }
+
+      for (const sheet of this._staleStyleSheets) {
+        if (sheet.ownerNode?.nodeName === 'STYLE')
+          this._markDirty(sheet.ownerNode);
+      }
+
+      // The fake <base> in the head uses the base URI, which changes for example with history.pushState().
+      if (document.baseURI !== this._lastBaseURI && document.head) {
+        const data = ensureNodeData(this._fakeBase);
+        data.attributesCached = undefined;
+        data.dirtyEpoch = this._markEpoch;
+        this._markDirty(document.head);
+      }
+    }
+
+    private _canScroll(element: Element, nodeName: string, shadowRoot: ShadowRoot | null): boolean {
+      // Without children, only form controls have content that can overflow.
+      if (!shadowRoot && !this._nativeFirstChild.call(element) && nodeName !== 'INPUT' && nodeName !== 'TEXTAREA' && nodeName !== 'SELECT')
+        return false;
+      return element.scrollHeight > element.clientHeight || element.scrollWidth > element.clientWidth;
+    }
+
+    private _definedCustomElements(): Set<string> {
+      const names = new Set<string>();
+      for (const element of this._customElements) {
+        if (!element.isConnected)
+          this._customElements.delete(element);
+        else if (window.customElements?.get(element.localName))
+          names.add(element.localName);
+      }
+      return names;
+    }
+
+    private _markChangedAdoptedStyleSheets(root: Document | ShadowRoot, node: Node) {
+      const sheets: CSSStyleSheet[] = (root as any).adoptedStyleSheets || [];
+      const cached = nodeData(node)?.adoptedStyleSheets || [];
+      let changed = sheets.length !== cached.length;
+      for (let i = 0; !changed && i < sheets.length; i++)
+        changed = sheets[i] !== cached[i] || this._staleStyleSheets.has(sheets[i]);
+      if (changed)
+        this._markDirty(node);
     }
 
     private __sanitizeMetaAttribute(name: string, value: string, httpEquiv: string) {
@@ -367,21 +569,22 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
     captureSnapshot(reset?: 'history' | 'targets'): SnapshotData | undefined {
       const timestamp = performance.now();
       const snapshotNumber = ++this._lastSnapshotNumber;
+      this._ensureObservingCurrentDocument();
       if (reset === 'history')
         this.resetHistory();
       if (reset)
-        ++this._targetGeneration;
+        this._resetTargets();
       let nodeCounter = 0;
       let shadowDomNesting = 0;
       let headNesting = 0;
 
-      this._ensureObservingCurrentDocument();
       // Ensure we are up to date.
       this._handleMutations(this._observer.takeRecords());
+      this._markChangesWithoutMutations();
+      // Nodes that change from now on are marked for the next snapshot.
+      const markEpoch = this._markEpoch++;
 
-      const definedCustomElements = new Set<string>();
-
-      const visitNode = (node: Node | ShadowRoot): { equals: boolean, n: NodeSnapshot } | undefined => {
+      const visitNode = (node: Node | ShadowRoot, deep: boolean): { equals: boolean, n: NodeSnapshot } | undefined => {
         const nodeType = node.nodeType;
         const nodeName = nodeType === Node.DOCUMENT_FRAGMENT_NODE ? 'template' : node.nodeName;
 
@@ -411,7 +614,14 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
         if ((nodeName === 'IFRAME' || nodeName === 'FRAME') && headNesting)
           return;
 
-        const data = ensureCachedData(node);
+        const data = ensureNodeData(node);
+        if (data.insertedEpoch === markEpoch)
+          deep = true;
+        // Nothing changed in this subtree since the previous snapshot: a full visit would
+        // find that the node is equal and return the same reference.
+        if (!deep && data.ref && data.dirtyEpoch !== markEpoch)
+          return { equals: true, n: [[snapshotNumber - data.ref[0], data.ref[1]]] };
+
         const values: any[] = [];
         let equals = !!data.cached;
         let extraNodes = 0;
@@ -453,7 +663,7 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
         const result: NodeSnapshot = [nodeName, attrs];
 
         const visitChild = (child: Node) => {
-          const snapshot = visitNode(child);
+          const snapshot = visitNode(child, deep);
           if (snapshot) {
             result.push(snapshot.n);
             expectValue(child);
@@ -470,13 +680,21 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
           }
         };
 
-        if (nodeType === Node.DOCUMENT_FRAGMENT_NODE)
+        if (nodeType === Node.DOCUMENT_FRAGMENT_NODE) {
           attrs[kShadowAttribute] = 'open';
+          this._trackShadowRoot(node as ShadowRoot);
+        }
 
         if (nodeType === Node.ELEMENT_NODE) {
           const element = node as Element;
-          if (element.localName.includes('-') && window.customElements?.get(element.localName))
-            definedCustomElements.add(element.localName);
+          if (element.localName.includes('-'))
+            this._customElements.add(element);
+          if (this._isVolatileElement(element, nodeName)) {
+            this._volatileElements.add(element);
+            data.volatileValues = this._volatileValues(element, nodeName);
+          } else {
+            this._volatileElements.delete(element);
+          }
           if (nodeName === 'INPUT' || nodeName === 'TEXTAREA') {
             const value = (element as HTMLInputElement).value;
             expectValue(kValueAttribute);
@@ -496,13 +714,7 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
             attrs[kSelectedAttribute] = value;
           }
           if (nodeName === 'CANVAS' || nodeName === 'IFRAME' || nodeName === 'FRAME') {
-            const boundingRect = (element as HTMLElement).getBoundingClientRect();
-            const value = JSON.stringify({
-              left: boundingRect.left,
-              top: boundingRect.top,
-              right: boundingRect.right,
-              bottom: boundingRect.bottom
-            });
+            const value = this._boundingRect(element);
             expectValue(kBoundingRectAttribute);
             expectValue(value);
             attrs[kBoundingRectAttribute] = value;
@@ -519,17 +731,25 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
             expectValue(value);
             attrs[kDialogOpenAttribute] = value;
           }
-          if (element.scrollTop) {
+          const scrollTop = element.scrollTop;
+          const scrollLeft = element.scrollLeft;
+          if (scrollTop) {
             expectValue(kScrollTopAttribute);
-            expectValue(element.scrollTop);
-            attrs[kScrollTopAttribute] = '' + element.scrollTop;
+            expectValue(scrollTop);
+            attrs[kScrollTopAttribute] = '' + scrollTop;
           }
-          if (element.scrollLeft) {
+          if (scrollLeft) {
             expectValue(kScrollLeftAttribute);
-            expectValue(element.scrollLeft);
-            attrs[kScrollLeftAttribute] = '' + element.scrollLeft;
+            expectValue(scrollLeft);
+            attrs[kScrollLeftAttribute] = '' + scrollLeft;
           }
           const shadowRoot = this._shadowRoot(element);
+          // Snapshots check the scroll offsets of scroll candidates even when the element
+          // did not change. A scroll event later adds other elements that scroll.
+          if (scrollTop || scrollLeft || this._canScroll(element, nodeName, shadowRoot))
+            this._scrollCandidates.add(element);
+          if (this._scrollCandidates.has(element))
+            data.scroll = scrollTop + ',' + scrollLeft;
           if (shadowRoot) {
             ++shadowDomNesting;
             visitChild(shadowRoot);
@@ -544,7 +764,8 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
         if (nodeName === 'HEAD') {
           ++headNesting;
           // Insert fake <base> first, to ensure all <link> elements use the proper base uri.
-          this._fakeBase.setAttribute('href', document.baseURI);
+          this._lastBaseURI = document.baseURI;
+          this._fakeBase.setAttribute('href', this._lastBaseURI);
           visitChild(this._fakeBase);
         }
         for (let child = this._nativeFirstChild.call(node); child; child = this._nativeNextSibling.call(child))
@@ -558,7 +779,9 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
         else if (node.nodeType === Node.DOCUMENT_FRAGMENT_NODE)
           documentOrShadowRoot = node;
         if (documentOrShadowRoot) {
-          for (const sheet of (documentOrShadowRoot as any).adoptedStyleSheets || [])
+          const sheets: CSSStyleSheet[] = [...((documentOrShadowRoot as any).adoptedStyleSheets || [])];
+          data.adoptedStyleSheets = sheets;
+          for (const sheet of sheets)
             visitChildStyleSheet(sheet);
           expectValue(kEndOfList);
         }
@@ -575,11 +798,14 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
         }
 
         // Process custom elements before bailing out since they depend on JS, not the DOM.
-        if (nodeName === 'BODY' && definedCustomElements.size) {
-          const value = [...definedCustomElements].join(',');
-          expectValue(kCustomElementsAttribute);
-          expectValue(value);
-          attrs[kCustomElementsAttribute] = value;
+        if (nodeName === 'BODY') {
+          const definedCustomElements = this._definedCustomElements();
+          if (definedCustomElements.size) {
+            const value = [...definedCustomElements].join(',');
+            expectValue(kCustomElementsAttribute);
+            expectValue(value);
+            attrs[kCustomElementsAttribute] = value;
+          }
         }
 
         // Process currentSrc before bailing out since it depends on JS, not the DOM.
@@ -649,7 +875,7 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
 
       let html: NodeSnapshot;
       if (document.documentElement) {
-        const { n } = visitNode(document.documentElement)!;
+        const { n } = visitNode(document.documentElement, false)!;
         html = n;
       } else {
         html = ['html'];
