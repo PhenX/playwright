@@ -54,6 +54,8 @@ export const LiveWorkbenchLoader: React.FC<{ traceJson: string }> = ({ traceJson
 async function loadSingleTraceFile(traceJson: string): Promise<TraceModel> {
   const params = new URLSearchParams();
   params.set('trace', traceJson);
+  // The trace grows: load its new lines on each poll.
+  params.set('reload', '1');
   const response = await fetch(`contexts?${params.toString()}`);
   const contextEntries = await response.json() as ContextEntry[];
   return new TraceModel(traceJson, contextEntries);
