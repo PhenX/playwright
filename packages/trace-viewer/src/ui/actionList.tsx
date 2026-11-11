@@ -81,10 +81,36 @@ export const ActionList: React.FC<ActionListProps> = ({
     return setSelectedTime({ minimum: item.action.startTime, maximum: item.action.endTime });
   }, [setSelectedTime]);
 
+  // While a live trace grows, a new model comes on each update, but most rows do not change.
+  // A row with the same content returns the same element, so that React skips it.
+  const renderedRows = React.useRef<{ traceUri?: string, rows: Map<string, { key: string, element: React.ReactNode }> }>({ rows: new Map() });
+  const callbacks = React.useRef({ revealConsole, revealActionAttachment });
+  callbacks.current = { revealConsole, revealActionAttachment };
+  if (renderedRows.current.traceUri !== model?.traceUri)
+    renderedRows.current = { traceUri: model?.traceUri, rows: new Map() };
+
   const render = React.useCallback((item: ActionTreeItem) => {
-    const showAttachments = !!revealActionAttachment && !!item.action.attachments?.length;
-    return renderAction(item.action, { model, sdkLanguage, revealConsole, revealActionAttachment: () => revealActionAttachment?.(item.action.callId), isLive, showDuration: true, showBadges: true, showAttachments });
-  }, [model, isLive, revealConsole, revealActionAttachment, sdkLanguage]);
+    const action = item.action;
+    const showAttachments = !!revealActionAttachment && !!action.attachments?.length;
+    const { errors, warnings } = model?.stats(action) ?? { errors: 0, warnings: 0 };
+    const key = [action.title, action.startTime, action.endTime, !!action.error, errors, warnings, showAttachments, isLive, sdkLanguage].join('|');
+    const rows = renderedRows.current.rows;
+    const cached = rows.get(action.callId);
+    if (cached?.key === key)
+      return cached.element;
+    const element = renderAction(action, {
+      model,
+      sdkLanguage,
+      revealConsole: () => callbacks.current.revealConsole?.(),
+      revealActionAttachment: () => callbacks.current.revealActionAttachment?.(action.callId),
+      isLive,
+      showDuration: true,
+      showBadges: true,
+      showAttachments,
+    });
+    rows.set(action.callId, { key, element });
+    return element;
+  }, [model, isLive, revealActionAttachment, sdkLanguage]);
 
   const isVisible = React.useCallback((item: ActionTreeItem) => {
     const timeVisible = !selectedTime || !item.action || (item.action.startTime <= selectedTime.maximum && item.action.endTime >= selectedTime.minimum);
