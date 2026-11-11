@@ -34,11 +34,14 @@ import type { Progress } from './progress';
 
 
 const kMaxBufferedZipEntrySize = 1024 * 1024;
+// A live stacks file is written at most this often.
+const kLiveStacksWriteDelay = 100;
 const kMaxBufferedZipTotalSize = 64 * 1024 * 1024;
 
 export type StackSession = {
   file: string;
   writer: Promise<void>;
+  writePending?: boolean;
   tmpDir: string | undefined;
   callStacks: channels.ClientSideCallMetadata[];
   live?: boolean;
@@ -245,10 +248,14 @@ export async function traceDiscarded(progress: Progress, stackSessions: Map<stri
 export function addStackToTracingNoReply(stackSessions: Map<string, StackSession>, params: channels.LocalUtilsAddStackToTracingNoReplyParams) {
   for (const session of stackSessions.values()) {
     session.callStacks.push(params.callData);
-    if (session.live) {
-      session.writer = session.writer.then(() => {
+    if (session.live && !session.writePending) {
+      // Each write has all the stacks: write once for the calls in a short time, not once for each call.
+      session.writePending = true;
+      session.writer = session.writer.then(async () => {
+        await new Promise(f => setTimeout(f, kLiveStacksWriteDelay));
+        session.writePending = false;
         const buffer = Buffer.from(JSON.stringify(serializeClientSideCallMetadata(session.callStacks)));
-        return fs.promises.writeFile(session.file, buffer);
+        await fs.promises.writeFile(session.file, buffer);
       });
     }
   }

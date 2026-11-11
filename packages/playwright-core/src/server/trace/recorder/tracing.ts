@@ -637,7 +637,7 @@ export class Tracing extends SdkObject implements InstrumentationListener, Snaps
     this._pendingHarEntries.delete(entry);
     const event: trace.ResourceSnapshotTraceEvent = { type: 'resource-snapshot', snapshot: entry };
     const visited = visitTraceEvent(event);
-    this._fs.appendFile(this._state!.networkFile, JSON.stringify(visited) + '\n', this._state!.options.live ? true : 'deferred');
+    this._fs.appendFile(this._state!.networkFile, JSON.stringify(visited) + '\n', 'deferred');
   }
 
   flushHarEntries() {
@@ -664,7 +664,7 @@ export class Tracing extends SdkObject implements InstrumentationListener, Snaps
     this._state!.crossChunkFiles.add(file);
     if (!this._allResources.has(file))
       this._allResources.add(file);
-    this._fs.appendFile(path.join(this._state!.tracesDir, file), text, this._state!.options.live /* flush */);
+    this._fs.appendFile(path.join(this._state!.tracesDir, file), text, this._state!.options.live ? 'deferred' : false);
     return file;
   }
 
@@ -795,8 +795,8 @@ export class Tracing extends SdkObject implements InstrumentationListener, Snaps
     // A frame snapshot holds only plain data from the page, and it can be large.
     const visited = event.type === 'frame-snapshot' ? event : visitTraceEvent(event);
     // Do not flush (console) events, they are too noisy, unless we are in ui mode (live).
-    // Outside of ui mode, flush other events a little later in one write: a write for each event costs too much.
-    const flush = this._state!.options.live ? true : (event.type !== 'event' && event.type !== 'console' && event.type !== 'log' ? 'deferred' : false);
+    // Flush a little later, in one write for several events: a write for each event costs too much.
+    const flush = this._state!.options.live || (event.type !== 'event' && event.type !== 'console' && event.type !== 'log') ? 'deferred' : false;
     this._fs.appendFile(this._state!.traceFile, JSON.stringify(visited) + '\n', flush);
   }
 

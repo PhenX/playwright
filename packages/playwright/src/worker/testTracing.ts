@@ -303,7 +303,7 @@ export class TestTracing {
   private _appendTraceEvent(event: trace.TraceEvent) {
     this._traceEvents.push(event);
     if (this._liveTraceFile)
-      this._liveTraceFile.fs.appendFile(this._liveTraceFile.file, JSON.stringify(event) + '\n', true);
+      this._liveTraceFile.fs.appendFile(this._liveTraceFile.file, JSON.stringify(event) + '\n', 'deferred');
   }
 }
 
