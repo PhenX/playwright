@@ -201,11 +201,15 @@ const FilmStripLane: React.FunctionComponent<{
   const effectiveWidth = (endTime - startTime) / boundariesDuration * width;
   const frameCount = (effectiveWidth / (frameSize.width + 2 * frameMargin)) | 0;
   const frameDuration = (endTime - startTime) / frameCount;
+  // Pick only every stride-th frame. While a live trace grows, the picked frames and their
+  // images then stay the same, and the stride doubles only from time to time.
+  const stride = 2 ** Math.max(0, Math.floor(Math.log2(screencastFrames.length / Math.max(1, frameCount))));
 
   const frames: React.JSX.Element[] = [];
   for (let i = 0; startTime && frameDuration && i < frameCount; ++i) {
     const time = startTime + frameDuration * i;
-    const index = upperBound(screencastFrames, time, timeComparator) - 1;
+    let index = upperBound(screencastFrames, time, timeComparator) - 1;
+    index -= index % stride;
     frames.push(<div className='film-strip-frame' key={i} style={{
       width: frameSize.width,
       height: frameSize.height,
