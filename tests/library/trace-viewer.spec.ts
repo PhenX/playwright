@@ -1046,6 +1046,26 @@ test('TV-047 should work with nesting CSS selectors', async ({ page, runAndTrace
   }
 });
 
+test('TV-138 should show new actions of a live trace', async ({ browserType, showTraceViewer, server }, testInfo) => {
+  const tracesDir = testInfo.outputPath('traces');
+  const browser = await browserType.launch({ tracesDir });
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await context.tracing.start({ name: 'live', snapshots: true, live: true } as any);
+  await page.goto(server.EMPTY_PAGE);
+  await page.setContent('<button>One</button><button>Two</button>');
+  await page.getByText('One').click();
+
+  // A trace path that ends with .json opens the live trace of the traces folder.
+  const traceViewer = await showTraceViewer(path.join(tracesDir, 'live.json'));
+  await expect(traceViewer.actionTitles).toContainText([/getByText\('One'\)/]);
+  await page.getByText('Two').click();
+  await expect(traceViewer.actionTitles).toContainText([/getByText\('One'\)/, /getByText\('Two'\)/]);
+
+  await context.tracing.stop();
+  await browser.close();
+});
+
 test('TV-048 should restore scroll positions', async ({ page, runAndTrace }) => {
   const traceViewer = await runAndTrace(async () => {
     await page.setContent(`
@@ -1110,26 +1130,6 @@ test('TV-137 should capture changes between snapshots', async ({ page, runAndTra
   await expect(frame.locator('#host span')).toHaveText('in shadow');
   await expect(frame.locator('base')).toHaveAttribute('href', /\/sub\/page$/);
   expect(await frame.locator('#scroller').evaluate(e => e.scrollTop)).toBe(40);
-});
-
-test('TV-138 should show new actions of a live trace', async ({ browserType, showTraceViewer, server }, testInfo) => {
-  const tracesDir = testInfo.outputPath('traces');
-  const browser = await browserType.launch({ tracesDir });
-  const context = await browser.newContext();
-  const page = await context.newPage();
-  await context.tracing.start({ name: 'live', snapshots: true, live: true } as any);
-  await page.goto(server.EMPTY_PAGE);
-  await page.setContent('<button>One</button><button>Two</button>');
-  await page.getByText('One').click();
-
-  // A trace path that ends with .json opens the live trace of the traces folder.
-  const traceViewer = await showTraceViewer(path.join(tracesDir, 'live.json'));
-  await expect(traceViewer.actionTitles).toContainText([/getByText\('One'\)/]);
-  await page.getByText('Two').click();
-  await expect(traceViewer.actionTitles).toContainText([/getByText\('One'\)/, /getByText\('Two'\)/]);
-
-  await context.tracing.stop();
-  await browser.close();
 });
 
 test('TV-049 should restore control values', async ({ page, runAndTrace, asset }) => {
