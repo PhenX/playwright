@@ -129,6 +129,7 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
     private _nativeShadowRoot: typeof ShadowRoot;
     private _nativeFirstChild: (this: Node) => Node | null;
     private _nativeNextSibling: (this: Node) => Node | null;
+    private _nativeGetComputedStyle: typeof window.getComputedStyle;
 
     // A snapshot visits only the nodes that are marked as dirty in the current mark epoch,
     // and their ancestors. Other nodes are the same as in the previous snapshot.
@@ -147,12 +148,20 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
       if (element?.nodeType === Node.ELEMENT_NODE)
         this._scrollCandidates.add(element as Element);
     };
+    // A loaded image can change its currentSrc without a DOM mutation, for example when it
+    // selects another source from srcset. It then fires load or error.
+    private _onImageLoad = (event: Event) => {
+      const target = event.target as Node | null;
+      if (target?.nodeName === 'IMG')
+        this._markDirty(target);
+    };
 
     constructor() {
       // Some pages overwrite the following native functions, so capture them in advance.
       this._nativeShadowRoot = window.ShadowRoot;
       this._nativeFirstChild = Object.getOwnPropertyDescriptor(window.Node.prototype, 'firstChild')!.get!;
       this._nativeNextSibling = Object.getOwnPropertyDescriptor(window.Node.prototype, 'nextSibling')!.get!;
+      this._nativeGetComputedStyle = window.getComputedStyle;
 
       const invalidateCSSGroupingRule = (rule: CSSGroupingRule) => {
         if (rule.parentStyleSheet)
@@ -218,7 +227,13 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
         this._markDirty(target);
       });
       (document as any).addEventListener('__playwright_reset_targets__', () => this._resetTargets());
-      document.addEventListener('scroll', this._onScroll, { capture: true, passive: true });
+      this._addListeners(document);
+    }
+
+    private _addListeners(root: Document | ShadowRoot) {
+      root.addEventListener('scroll', this._onScroll, { capture: true, passive: true });
+      root.addEventListener('load', this._onImageLoad, { capture: true, passive: true });
+      root.addEventListener('error', this._onImageLoad, { capture: true, passive: true });
     }
 
     private _resetTargets() {
@@ -381,12 +396,15 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
       this._shadowRoots.add(shadowRoot);
       // The document observer and listeners do not see changes and events in shadow roots.
       this._observer.observe(shadowRoot, kObserverConfig);
-      shadowRoot.addEventListener('scroll', this._onScroll, { capture: true, passive: true });
+      this._addListeners(shadowRoot);
     }
 
     private _isVolatileElement(element: Element, nodeName: string): boolean {
       return nodeName === 'INPUT' || nodeName === 'TEXTAREA' || nodeName === 'OPTION' ||
-          nodeName === 'CANVAS' || nodeName === 'IFRAME' || nodeName === 'FRAME' || nodeName === 'IMG' ||
+          nodeName === 'CANVAS' || nodeName === 'IFRAME' || nodeName === 'FRAME' ||
+          // The currentSrc of a loading image changes before the load event.
+          // _onImageLoad() marks the images that are already loaded.
+          (nodeName === 'IMG' && !(element as HTMLImageElement).complete) ||
           !!(element as HTMLElement).popover;
     }
 
@@ -405,7 +423,7 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
       if ((element as HTMLElement).popover)
         values.push(!!(element as HTMLElement).matches?.(':popover-open'));
       if (nodeName === 'IMG')
-        values.push((element as HTMLImageElement).currentSrc);
+        values.push((element as HTMLImageElement).currentSrc, (element as HTMLImageElement).complete);
       return values;
     }
 
@@ -471,11 +489,14 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
       }
     }
 
-    private _canScroll(element: Element, nodeName: string, shadowRoot: ShadowRoot | null): boolean {
-      // Without children, only form controls have content that can overflow.
-      if (!shadowRoot && !this._nativeFirstChild.call(element) && nodeName !== 'INPUT' && nodeName !== 'TEXTAREA' && nodeName !== 'SELECT')
-        return false;
-      return element.scrollHeight > element.clientHeight || element.scrollWidth > element.clientWidth;
+    // Only a scroll container, the scrolling element and form controls can have scroll offsets.
+    // Reading the computed overflow costs less than reading the scroll offsets.
+    private _isScrollContainer(element: Element, nodeName: string): boolean {
+      if (nodeName === 'INPUT' || nodeName === 'TEXTAREA' || nodeName === 'SELECT')
+        return true;
+      const style = this._nativeGetComputedStyle.call(window, element);
+      const scrolls = (overflow: string) => overflow !== 'visible' && overflow !== 'clip';
+      return scrolls(style.overflowX) || scrolls(style.overflowY);
     }
 
     private _definedCustomElements(): Set<string> {
@@ -731,8 +752,18 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
             expectValue(value);
             attrs[kDialogOpenAttribute] = value;
           }
-          const scrollTop = element.scrollTop;
-          const scrollLeft = element.scrollLeft;
+          let scrollTop = 0;
+          let scrollLeft = 0;
+          if (this._scrollCandidates.has(element) || this._isScrollContainer(element, nodeName)) {
+            scrollTop = element.scrollTop;
+            scrollLeft = element.scrollLeft;
+            // Snapshots check the scroll offsets of scroll candidates even when the element
+            // did not change. A scroll event adds the other elements that scroll later.
+            if (scrollTop || scrollLeft || element.scrollHeight > element.clientHeight || element.scrollWidth > element.clientWidth)
+              this._scrollCandidates.add(element);
+            if (this._scrollCandidates.has(element))
+              data.scroll = scrollTop + ',' + scrollLeft;
+          }
           if (scrollTop) {
             expectValue(kScrollTopAttribute);
             expectValue(scrollTop);
@@ -744,12 +775,6 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
             attrs[kScrollLeftAttribute] = '' + scrollLeft;
           }
           const shadowRoot = this._shadowRoot(element);
-          // Snapshots check the scroll offsets of scroll candidates even when the element
-          // did not change. A scroll event later adds other elements that scroll.
-          if (scrollTop || scrollLeft || this._canScroll(element, nodeName, shadowRoot))
-            this._scrollCandidates.add(element);
-          if (this._scrollCandidates.has(element))
-            data.scroll = scrollTop + ',' + scrollLeft;
           if (shadowRoot) {
             ++shadowDomNesting;
             visitChild(shadowRoot);
