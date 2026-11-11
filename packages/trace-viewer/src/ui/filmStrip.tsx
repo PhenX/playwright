@@ -204,6 +204,8 @@ const FilmStripLane: React.FunctionComponent<{
   // Pick only every stride-th frame. While a live trace grows, the picked frames and their
   // images then stay the same, and the stride doubles only from time to time.
   const stride = 2 ** Math.max(0, Math.floor(Math.log2(screencastFrames.length / Math.max(1, frameCount))));
+  // Load small images: the page keeps a full-size decoded image in memory for each frame that it shows small.
+  const frameUrl = (file: string) => model?.createRelativeUrl(`file/${file}?width=${Math.ceil(frameSize.width * window.devicePixelRatio)}&height=${Math.ceil(frameSize.height * window.devicePixelRatio)}`);
 
   const frames: React.JSX.Element[] = [];
   for (let i = 0; startTime && frameDuration && i < frameCount; ++i) {
@@ -213,7 +215,7 @@ const FilmStripLane: React.FunctionComponent<{
     frames.push(<div className='film-strip-frame' key={i} style={{
       width: frameSize.width,
       height: frameSize.height,
-      backgroundImage: `url(${model?.createRelativeUrl('file/' + screencastFrames[index].file)})`,
+      backgroundImage: `url(${frameUrl(screencastFrames[index].file)})`,
       backgroundSize: `${frameSize.width}px ${frameSize.height}px`,
       margin: frameMargin,
       marginRight: frameMargin,
@@ -223,7 +225,7 @@ const FilmStripLane: React.FunctionComponent<{
   frames.push(<div className='film-strip-frame' key={frames.length} style={{
     width: frameSize.width,
     height: frameSize.height,
-    backgroundImage: `url(${model?.createRelativeUrl('file/' + screencastFrames[screencastFrames.length - 1].file)})`,
+    backgroundImage: `url(${frameUrl(screencastFrames[screencastFrames.length - 1].file)})`,
     backgroundSize: `${frameSize.width}px ${frameSize.height}px`,
     margin: frameMargin,
     marginRight: frameMargin,

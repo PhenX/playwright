@@ -40,6 +40,14 @@ test('should show screenshots', async ({ runUITest }) => {
   await page.getByText('test 1', { exact: true }).click();
   await expect(page.getByTestId('actions-tree')).toContainText('Expect');
   await expect(page.locator('.film-strip-frame').first()).toBeVisible();
+  // The film strip loads small images, not the full screencast frames.
+  const sizes = await page.locator('.film-strip-frame').first().evaluate(async element => {
+    const image = new Image();
+    image.src = getComputedStyle(element).backgroundImage.slice('url("'.length, -'")'.length);
+    await image.decode();
+    return { imageWidth: image.naturalWidth, maxWidth: Math.ceil(element.clientWidth * window.devicePixelRatio) };
+  });
+  expect(sizes.imageWidth).toBeLessThanOrEqual(sizes.maxWidth);
 
   await page.getByText('test 2', { exact: true }).click();
   await expect(page.getByTestId('actions-tree')).toContainText('Expect');

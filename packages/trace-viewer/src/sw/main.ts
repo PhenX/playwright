@@ -15,6 +15,7 @@
  */
 
 import { takeBranchCounters, takeCounters } from '@isomorphic/istanbulCoverage';
+import { LRUCache } from '@isomorphic/lruCache';
 import { SnapshotServer } from '@isomorphic/trace/snapshotServer';
 import { TraceLoader } from '@isomorphic/trace/traceLoader';
 import { TraceVersionError } from '@isomorphic/trace/traceModernizer';
@@ -65,7 +66,12 @@ self.addEventListener('activate', function(event: any) {
 type LoadedTrace = {
   traceLoader: TraceLoader;
   snapshotServer: SnapshotServer;
+  // The page can ask again for a small image that it dropped, for example when the film strip changes.
+  resizedImages: LRUCache<string, Promise<Blob>>;
 };
+
+// About 2,000 film strip images on a normal screen.
+const kResizedImagesCacheSize = 8_000_000;
 
 const scopePath = new URL(self.registration.scope).pathname;
 const loadedTraces = new Map<string, Promise<LoadedTrace>>();
@@ -156,7 +162,7 @@ async function innerLoadTrace(traceUri: string, progress: Progress): Promise<Loa
     throw new Error(message);
   }
   const snapshotServer = new SnapshotServer(traceLoader.storage(), file => traceLoader.resourceEntry(file));
-  return { traceLoader, snapshotServer };
+  return { traceLoader, snapshotServer, resizedImages: new LRUCache(kResizedImagesCacheSize) };
 }
 
 async function doFetch(event: FetchEvent): Promise<Response> {
@@ -255,10 +261,14 @@ async function doFetch(event: FetchEvent): Promise<Response> {
     }
 
     if (relativePath.startsWith('/file/')) {
-      const blob = await loadedTrace!.traceLoader.resourceEntry(relativePath.slice('/file/'.length));
-      if (blob)
-        return new Response(blob, { status: 200, headers: downloadHeaders(url.searchParams) });
-      return new Response(null, { status: 404 });
+      const file = relativePath.slice('/file/'.length);
+      const blob = await loadedTrace!.traceLoader.resourceEntry(file);
+      if (!blob)
+        return new Response(null, { status: 404 });
+      const width = Number(url.searchParams.get('width'));
+      const height = Number(url.searchParams.get('height'));
+      const body = width > 0 && height > 0 ? await loadedTrace!.resizedImages.getOrCompute(`${file} ${width}x${height}`, () => ({ value: resizeImage(blob, width, height), size: width * height })) : blob;
+      return new Response(body, { status: 200, headers: downloadHeaders(url.searchParams) });
     }
   }
 
@@ -276,6 +286,26 @@ function takeCoverage(): IstanbulCoverage {
     takeBranchCounters(file.b);
   }
   return result;
+}
+
+// For small images of large images, such as the film strip. The page decodes an image at its full size before it scales it,
+// and keeps the decoded image in memory: a small image uses less memory than a large image that is shown small.
+// The caller gives the size in device pixels, so that the image stays sharp on high density screens.
+async function resizeImage(blob: Blob, width: number, height: number): Promise<Blob> {
+  try {
+    const bitmap = await createImageBitmap(blob, { resizeWidth: width, resizeHeight: height, resizeQuality: 'high' });
+    try {
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+      canvas.getContext('2d')!.drawImage(bitmap, 0, 0);
+      // PNG: at small sizes, JPEG adds colored fringes at the edges.
+      return await canvas.convertToBlob({ type: 'image/png' });
+    } finally {
+      bitmap.close();
+    }
+  } catch {
+    // For example, the browser cannot draw in a service worker.
+    return blob;
+  }
 }
 
 function downloadHeaders(searchParams: URLSearchParams): Headers | undefined {
