@@ -69,11 +69,14 @@ type LoadedTrace = {
 
 const scopePath = new URL(self.registration.scope).pathname;
 const loadedTraces = new Map<string, Promise<LoadedTrace>>();
+// The last update of each live trace: updates run one after another.
+const liveUpdates = new Map<string, Promise<LoadedTrace>>();
 const clientIdToTraceUrls = new Map<string, string>();
 const isDeployedAsHttps = self.registration.scope.startsWith('https://');
 
 function simulateRestart() {
   loadedTraces.clear();
+  liveUpdates.clear();
   clientIdToTraceUrls.clear();
 }
 
@@ -99,9 +102,12 @@ function loadTrace(clientId: string, url: URL, progress: Progress): Promise<Load
   clientIdToTraceUrls.set(clientId, traceUri);
   const loadedTrace = loadedTraces.get(traceUri);
   if (loadedTrace && url.searchParams.has('reload')) {
-    // A live trace grows while the test runs. Other requests use the previous load until this one is ready.
-    const promise = innerLoadTrace(traceUri, progress);
-    promise.then(() => loadedTraces.set(traceUri, promise), () => {});
+    // A live trace grows while the test runs: load only its new lines.
+    const promise = (liveUpdates.get(traceUri) || loadedTrace).then(
+        trace => updateLiveTrace(traceUri, trace, progress),
+        () => innerLoadTrace(traceUri, progress));
+    liveUpdates.set(traceUri, promise);
+    promise.then(trace => loadedTraces.set(traceUri, Promise.resolve(trace)), () => {});
     return promise;
   }
   if (loadedTrace)
@@ -110,6 +116,18 @@ function loadTrace(clientId: string, url: URL, progress: Progress): Promise<Load
   loadedTraces.set(traceUri, promise);
   promise.catch(() => loadedTraces.delete(traceUri));
   return promise;
+}
+
+async function updateLiveTrace(traceUri: string, trace: LoadedTrace, progress: Progress): Promise<LoadedTrace> {
+  if (trace.traceLoader.canUpdate()) {
+    try {
+      await trace.traceLoader.update();
+      return trace;
+    } catch {
+      // For example, a file was written again with less content: load the whole trace again.
+    }
+  }
+  return innerLoadTrace(traceUri, progress);
 }
 
 async function innerLoadTrace(traceUri: string, progress: Progress): Promise<LoadedTrace> {
@@ -282,8 +300,10 @@ async function gc() {
   }
 
   for (const traceUrl of loadedTraces.keys()) {
-    if (!usedTraces.has(traceUrl))
+    if (!usedTraces.has(traceUrl)) {
       loadedTraces.delete(traceUrl);
+      liveUpdates.delete(traceUrl);
+    }
   }
 }
 

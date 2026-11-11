@@ -25,19 +25,45 @@ export interface TraceLoaderBackend {
   readText(entryName: string): Promise<string | undefined>;
   readBlob(entryName: string): Promise<Blob | undefined>;
   isLive(): boolean;
+  // Live traces only: their files grow while the test runs.
+  // refresh() reads the list of entries again.
+  refresh?(): Promise<void>;
+  // Reads the complete lines after a byte offset, and returns the offset after them.
+  // Returns undefined when the entry does not exist, and throws when the entry is now smaller.
+  readLines?(entryName: string, offset: number): Promise<{ text: string, nextOffset: number } | undefined>;
 }
+
+// The state of one trace file of a live trace, to load the lines that are added later.
+type LiveContext = {
+  contextEntry: ContextEntry;
+  modernizer: TraceModernizer;
+  offsets: Map<string, number>;
+  stacks: string | undefined;
+  resourceCount: number;
+};
 
 export class TraceLoader {
   contextEntries: ContextEntry[] = [];
   private _snapshotStorage: SnapshotStorage | undefined;
   private _backend!: TraceLoaderBackend;
   private _resourceToContentType = new Map<string, string>();
+  private _liveContexts: Map<string, LiveContext> | undefined;
 
   constructor() {
   }
 
   async load(backend: TraceLoaderBackend, traceFile?: string, unzipProgress?: (done: number, total: number) => void) {
     this._backend = backend;
+
+    if (backend.readLines && !traceFile) {
+      this._snapshotStorage = new SnapshotStorage();
+      this._liveContexts = new Map();
+      await this.update();
+      if (!this.contextEntries.length)
+        throw new Error('Cannot find .trace file');
+      unzipProgress?.(1, 1);
+      return;
+    }
 
     const prefix = traceFile?.match(/(.+)\.trace$/)?.[1];
     const prefixes: string[] = [];
@@ -91,17 +117,84 @@ export class TraceLoader {
         }
       }
 
-      for (const resource of contextEntry.resources) {
-        if (resource.request.postData?._file)
-          this._resourceToContentType.set(resource.request.postData._file, stripEncodingFromContentType(resource.request.postData.mimeType));
-        if (resource.response.content?._file)
-          this._resourceToContentType.set(resource.response.content._file, stripEncodingFromContentType(resource.response.content.mimeType));
-      }
+      for (const resource of contextEntry.resources)
+        this._addResourceContentType(resource);
 
       this.contextEntries.push(contextEntry);
     }
 
     this._snapshotStorage.finalize();
+  }
+
+  canUpdate(): boolean {
+    return !!this._liveContexts;
+  }
+
+  // Loads the lines that were added to a live trace since the last load, instead of all lines again.
+  async update() {
+    const backend = this._backend;
+    const liveContexts = this._liveContexts!;
+    await backend.refresh?.();
+
+    const prefixes: string[] = [];
+    let hasSource = false;
+    for (const entryName of await backend.entryNames()) {
+      const match = entryName.match(/(.+)\.trace$/);
+      if (match)
+        prefixes.push(match[1] || '');
+      if (entryName.startsWith('src/') || entryName.includes('src@'))
+        hasSource = true;
+    }
+
+    for (const prefix of prefixes) {
+      let live = liveContexts.get(prefix);
+      if (!live) {
+        const contextEntry = createEmptyContext();
+        live = { contextEntry, modernizer: new TraceModernizer(contextEntry, this._snapshotStorage!), offsets: new Map(), stacks: undefined, resourceCount: 0 };
+        liveContexts.set(prefix, live);
+        this.contextEntries.push(contextEntry);
+      }
+      live.contextEntry.hasSource = hasSource;
+
+      let changed = false;
+      for (const entryName of [prefix + '.trace', prefix + '.network']) {
+        const result = await backend.readLines!(entryName, live.offsets.get(entryName) || 0);
+        if (!result)
+          continue;
+        if (result.text) {
+          live.modernizer.appendTrace(result.text);
+          changed = true;
+        }
+        live.offsets.set(entryName, result.nextOffset);
+      }
+
+      // The stacks file is written again as a whole: apply it to the new actions too.
+      const stacks = await backend.readText(prefix + '.stacks');
+      if (stacks && (changed || stacks !== live.stacks)) {
+        try {
+          live.modernizer.appendStacks(stacks);
+          live.stacks = stacks;
+        } catch {
+          // The file can be read while it is written: use it on the next update.
+        }
+      }
+
+      if (!changed)
+        continue;
+      live.contextEntry.actions = live.modernizer.actions().sort((a1, a2) => a1.startTime - a2.startTime);
+      for (const resource of live.contextEntry.resources.slice(live.resourceCount))
+        this._addResourceContentType(resource);
+      live.resourceCount = live.contextEntry.resources.length;
+    }
+
+    this._snapshotStorage!.finalize();
+  }
+
+  private _addResourceContentType(resource: ContextEntry['resources'][number]) {
+    if (resource.request.postData?._file)
+      this._resourceToContentType.set(resource.request.postData._file, stripEncodingFromContentType(resource.request.postData.mimeType));
+    if (resource.response.content?._file)
+      this._resourceToContentType.set(resource.response.content._file, stripEncodingFromContentType(resource.response.content.mimeType));
   }
 
   async hasEntry(filename: string): Promise<boolean> {

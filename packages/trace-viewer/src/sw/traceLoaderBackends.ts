@@ -83,22 +83,58 @@ export class ZipTraceLoaderBackend implements TraceLoaderBackend {
 }
 
 export class FetchTraceLoaderBackend implements TraceLoaderBackend {
+  private _traceUri: string;
   private _entriesPromise: Promise<Map<string, string>>;
 
   constructor(traceUri: string) {
-    this._entriesPromise = this._readFile(traceUri).then(async response => {
-      if (!response)
-        throw new Error('File not found');
-      const json = await response.json();
-      const entries = new Map<string, string>();
-      for (const entry of json.entries)
-        entries.set(entry.name, entry.path);
-      return entries;
-    });
+    this._traceUri = traceUri;
+    this._entriesPromise = this._readEntries();
+  }
+
+  private async _readEntries(): Promise<Map<string, string>> {
+    const response = await this._readFile(this._traceUri);
+    if (!response)
+      throw new Error('File not found');
+    const json = await response.json();
+    const entries = new Map<string, string>();
+    for (const entry of json.entries)
+      entries.set(entry.name, entry.path);
+    return entries;
   }
 
   isLive() {
     return true;
+  }
+
+  async refresh() {
+    const entries = await this._readEntries();
+    this._entriesPromise = Promise.resolve(entries);
+  }
+
+  async readLines(entryName: string, offset: number): Promise<{ text: string, nextOffset: number } | undefined> {
+    const entries = await this._entriesPromise;
+    const fileUri = entries.get(entryName);
+    if (!fileUri)
+      return;
+    const response = await fetch(fileUri, offset ? { headers: { range: `bytes=${offset}-` } } : undefined);
+    if (response.status === 404)
+      return;
+    if (response.status === 416) {
+      // Nothing after the offset, unless the file was written again with less content.
+      const size = Number(response.headers.get('content-range')?.match(/\/(\d+)$/)?.[1]);
+      if (!(size >= offset))
+        throw new Error(`${entryName} is smaller than before`);
+      return { text: '', nextOffset: offset };
+    }
+    if (offset && response.status !== 206)
+      throw new Error(`Cannot read ${entryName} from an offset`);
+    // A line can be incomplete while it is written: read it on the next update.
+    // The last line of a finished file can have no newline: read it when it is complete.
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    let end = bytes.lastIndexOf(10 /* \n */) + 1;
+    if (end < bytes.length && isCompleteJSON(new TextDecoder().decode(bytes.subarray(end))))
+      end = bytes.length;
+    return { text: new TextDecoder().decode(bytes.subarray(0, end)), nextOffset: offset + end };
   }
 
   async entryNames(): Promise<string[]> {
@@ -134,5 +170,14 @@ export class FetchTraceLoaderBackend implements TraceLoaderBackend {
     if (response.status === 404)
       return;
     return response;
+  }
+}
+
+function isCompleteJSON(text: string): boolean {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
   }
 }

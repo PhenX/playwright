@@ -81,7 +81,7 @@ export const TraceView: React.FC<{
     const pollTimer = setTimeout(async () => {
       const pollStart = performance.now();
       try {
-        const model = await loadSingleTraceFile(traceLocation, undefined, signal, liveContexts);
+        const model = await loadSingleTraceFile(traceLocation, result.startTime.getTime(), signal, liveContexts);
         if (model)
           setModel({ model, isLive: true });
       } catch {
@@ -135,13 +135,13 @@ const outputDirForTestCase = (testCase: reporterTypes.TestCase): string | undefi
   return undefined;
 };
 
-// Without a timestamp, the trace is live: it keeps the same uri, so that the urls of its resources and
-// snapshots do not change between polls, and the reload parameter loads the trace again.
-async function loadSingleTraceFile(absolutePath: string, timestamp: number | undefined, signal: AbortSignal, previousContexts?: React.MutableRefObject<string | undefined>): Promise<TraceModel | undefined> {
-  const traceUri = `file?path=${encodeURIComponent(absolutePath)}` + (timestamp !== undefined ? `&timestamp=${timestamp}` : '');
+// With previousContexts, the trace is live. Its uri does not change while the test runs, so that the urls
+// of its resources and snapshots do not change between polls, and the reload parameter loads the new lines.
+async function loadSingleTraceFile(absolutePath: string, timestamp: number, signal: AbortSignal, previousContexts?: React.MutableRefObject<string | undefined>): Promise<TraceModel | undefined> {
+  const traceUri = `file?path=${encodeURIComponent(absolutePath)}&timestamp=${timestamp}`;
   const params = new URLSearchParams();
   params.set('trace', traceUri);
-  if (timestamp === undefined)
+  if (previousContexts)
     params.set('reload', '1');
   const response = await fetch(`contexts?${params.toString()}`, { signal });
   const text = await response.text();
