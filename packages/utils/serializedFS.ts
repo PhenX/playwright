@@ -39,8 +39,13 @@ type SerializedFSOperation = {
 // merged content keeps any single op below V8's ~512MB max string length.
 const APPEND_CHUNK_SIZE = 64 * 1024;
 
+// Deferred flushes in this time become one write.
+const DEFERRED_FLUSH_DELAY = 100;
+
 export class SerializedFS {
-  private _buffers = new Map<string, string[]>(); // Should never be accessed from within appendOperation.
+  // flushCount: the number of chunks that the next deferred flush writes.
+  private _buffers = new Map<string, { chunks: string[], size: number, flushCount: number }>(); // Should never be accessed from within appendOperation.
+  private _deferredFlushTimer: NodeJS.Timeout | undefined;
   private _error: Error | undefined;
   private _operations: SerializedFSOperation[] = [];
   private _operationsDone: ManualPromise<void>;
@@ -59,23 +64,50 @@ export class SerializedFS {
     this._appendOperation({ op: 'writeFile', file, content, skipIfExists });
   }
 
-  appendFile(file: string, text: string, flush?: boolean) {
-    if (!this._buffers.has(file))
-      this._buffers.set(file, []);
-    const buffer = this._buffers.get(file)!;
-    buffer.push(text);
-    let size = 0;
-    for (const chunk of buffer)
-      size += chunk.length;
-    if (flush || size >= APPEND_CHUNK_SIZE)
+  // flush: true writes the buffered text now. 'deferred' writes the text that is buffered now
+  // a little later, in the same write as other deferred flushes.
+  appendFile(file: string, text: string, flush?: boolean | 'deferred') {
+    let buffer = this._buffers.get(file);
+    if (!buffer) {
+      buffer = { chunks: [], size: 0, flushCount: 0 };
+      this._buffers.set(file, buffer);
+    }
+    buffer.chunks.push(text);
+    buffer.size += text.length;
+    if (flush === true || buffer.size >= APPEND_CHUNK_SIZE) {
       this._flushFile(file);
+    } else if (flush === 'deferred') {
+      buffer.flushCount = buffer.chunks.length;
+      this._deferredFlushTimer ??= setTimeout(() => this._flushDeferred(), DEFERRED_FLUSH_DELAY);
+    }
+  }
+
+  private _flushDeferred() {
+    this._deferredFlushTimer = undefined;
+    for (const [file, buffer] of this._buffers) {
+      if (!buffer.flushCount)
+        continue;
+      const content = buffer.chunks.splice(0, buffer.flushCount).join('');
+      buffer.flushCount = 0;
+      buffer.size -= content.length;
+      if (!buffer.chunks.length)
+        this._buffers.delete(file);
+      this._appendOperation({ op: 'appendFile', file, content });
+    }
+  }
+
+  private _flushAll() {
+    for (const file of this._buffers.keys())
+      this._flushFile(file);
+    clearTimeout(this._deferredFlushTimer);
+    this._deferredFlushTimer = undefined;
   }
 
   private _flushFile(file: string) {
     const buffer = this._buffers.get(file);
     if (buffer === undefined)
       return;
-    const content = buffer.join('');
+    const content = buffer.chunks.join('');
     this._buffers.delete(file);
     this._appendOperation({ op: 'appendFile', file, content });
   }
@@ -87,8 +119,7 @@ export class SerializedFS {
   }
 
   async sync() {
-    for (const file of this._buffers.keys())
-      this._flushFile(file);
+    this._flushAll();
     await this._operationsDone;
     if (this._error) {
       const e = this._error;
@@ -98,8 +129,7 @@ export class SerializedFS {
   }
 
   zip(entries: NameValue[], zipFileName: string) {
-    for (const file of this._buffers.keys())
-      this._flushFile(file);
+    this._flushAll();
 
     // Chain the export operation against write operations,
     // so that files do not change during the export.
