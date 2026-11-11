@@ -48,6 +48,17 @@ export type ContextEntry = {
   annotations?: trace.TraceEventAnnotation[];
 };
 
+// The reply to a poll of a live trace: what changed since the cursor of the previous reply.
+export type ContextsUpdate = {
+  // Send it back with the next poll.
+  cursor: string;
+  // When true, `contexts` are the whole contexts. When false, each context, at the same index as before,
+  // has the current value of each field, the items that were added to each list, the new frames of each page,
+  // and only the actions that were added or changed.
+  full: boolean;
+  contexts: ContextEntry[];
+};
+
 export type PageEntry = {
   pageId: string,
   screencastFrames: {

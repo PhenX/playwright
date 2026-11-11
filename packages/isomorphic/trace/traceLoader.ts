@@ -14,10 +14,12 @@
  * limitations under the License.
  */
 
+import { contextChanges, contextListLengths } from './contextsUpdate';
 import { SnapshotStorage } from './snapshotStorage';
 import { TraceModernizer } from './traceModernizer';
 
-import type { ContextEntry } from './entries';
+import type { ContextListLengths } from './contextsUpdate';
+import type { ContextEntry, ContextsUpdate } from './entries';
 
 export interface TraceLoaderBackend {
   entryNames(): Promise<string[]>;
@@ -40,7 +42,12 @@ type LiveContext = {
   offsets: Map<string, number>;
   stacks: string | undefined;
   resourceCount: number;
+  // The last revision that added or changed each action.
+  actionRevisions: Map<string, number>;
 };
+
+// The number of past revisions of a live trace that a poll can get the changes from.
+const kKeptRevisions = 20;
 
 export class TraceLoader {
   contextEntries: ContextEntry[] = [];
@@ -48,6 +55,11 @@ export class TraceLoader {
   private _backend!: TraceLoaderBackend;
   private _resourceToContentType = new Map<string, string>();
   private _liveContexts: Map<string, LiveContext> | undefined;
+  // Live traces: each update that changes the trace makes a new revision.
+  private _revision = 0;
+  // A cursor of another trace loader, for example before the service worker restarted, gets the whole contexts.
+  private _cursorPrefix = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  private _listLengths = new Map<number, ContextListLengths[]>();
 
   constructor() {
   }
@@ -139,38 +151,44 @@ export class TraceLoader {
     const prefixes: string[] = [];
     let hasSource = false;
     for (const entryName of await backend.entryNames()) {
-      const match = entryName.match(/(.+)\.trace$/);
-      if (match)
-        prefixes.push(match[1] || '');
+      if (entryName.endsWith('.trace') && entryName.length > '.trace'.length)
+        prefixes.push(entryName.slice(0, -'.trace'.length));
       if (entryName.startsWith('src/') || entryName.includes('src@'))
         hasSource = true;
     }
 
+    const revision = this._revision + 1;
+    let changed = false;
     for (const prefix of prefixes) {
       let live = liveContexts.get(prefix);
       if (!live) {
         const contextEntry = createEmptyContext();
-        live = { contextEntry, modernizer: new TraceModernizer(contextEntry, this._snapshotStorage!), offsets: new Map(), stacks: undefined, resourceCount: 0 };
+        live = { contextEntry, modernizer: new TraceModernizer(contextEntry, this._snapshotStorage!), offsets: new Map(), stacks: undefined, resourceCount: 0, actionRevisions: new Map() };
+        live.modernizer.trackChangedActions();
         liveContexts.set(prefix, live);
         this.contextEntries.push(contextEntry);
+        changed = true;
       }
-      live.contextEntry.hasSource = hasSource;
+      if (live.contextEntry.hasSource !== hasSource) {
+        live.contextEntry.hasSource = hasSource;
+        changed = true;
+      }
 
-      let changed = false;
+      let appended = false;
       for (const entryName of [prefix + '.trace', prefix + '.network']) {
         const result = await backend.readLines!(entryName, live.offsets.get(entryName) || 0);
         if (!result)
           continue;
         if (result.text) {
           live.modernizer.appendTrace(result.text);
-          changed = true;
+          appended = true;
         }
         live.offsets.set(entryName, result.nextOffset);
       }
 
       // The stacks file is written again as a whole: apply it to the new actions too.
       const stacks = await backend.readText(prefix + '.stacks');
-      if (stacks && (changed || stacks !== live.stacks)) {
+      if (stacks && (appended || stacks !== live.stacks)) {
         try {
           live.modernizer.appendStacks(stacks);
           live.stacks = stacks;
@@ -179,8 +197,14 @@ export class TraceLoader {
         }
       }
 
-      if (!changed)
+      for (const callId of live.modernizer.takeChangedActions()) {
+        live.actionRevisions.set(callId, revision);
+        changed = true;
+      }
+
+      if (!appended)
         continue;
+      changed = true;
       live.contextEntry.actions = live.modernizer.actions().sort((a1, a2) => a1.startTime - a2.startTime);
       for (const resource of live.contextEntry.resources.slice(live.resourceCount))
         this._addResourceContentType(resource);
@@ -188,6 +212,27 @@ export class TraceLoader {
     }
 
     this._snapshotStorage!.finalize();
+    if (changed) {
+      this._revision = revision;
+      this._listLengths.set(revision, this.contextEntries.map(contextListLengths));
+      this._listLengths.delete(revision - kKeptRevisions);
+    }
+  }
+
+  // Live traces: the changes since the cursor of an earlier update, or the whole contexts.
+  contextsUpdate(since: string | null): ContextsUpdate {
+    const cursor = `${this._cursorPrefix}.${this._revision}`;
+    const [cursorPrefix, revisionText] = since?.split('.') ?? [];
+    const revision = Number(revisionText);
+    const lengths = cursorPrefix === this._cursorPrefix ? this._listLengths.get(revision) : undefined;
+    if (!this._liveContexts || !lengths)
+      return { cursor, full: true, contexts: this.contextEntries };
+    if (revision === this._revision)
+      return { cursor, full: false, contexts: [] };
+    const contexts = [...this._liveContexts.values()].map((live, index) => {
+      return contextChanges(live.contextEntry, lengths[index], callId => live.actionRevisions.get(callId)! > revision);
+    });
+    return { cursor, full: false, contexts };
   }
 
   private _addResourceContentType(resource: ContextEntry['resources'][number]) {

@@ -18,13 +18,15 @@ import * as React from 'react';
 import { TraceModel } from '@isomorphic/trace/traceModel';
 import './workbenchLoader.css';
 import { Workbench } from './workbench';
+import { loadLiveTrace } from './liveTrace';
 
-import type { ContextEntry } from '@isomorphic/trace/entries';
+import type { LiveTrace } from './liveTrace';
 
 export const LiveWorkbenchLoader: React.FC<{ traceJson: string }> = ({ traceJson }) => {
   const [model, setModel] = React.useState<TraceModel | undefined>(undefined);
   const [counter, setCounter] = React.useState(0);
   const pollTimer = React.useRef<NodeJS.Timeout | null>(null);
+  const liveTrace = React.useRef<LiveTrace | undefined>(undefined);
 
   React.useEffect(() => {
     if (pollTimer.current)
@@ -33,8 +35,11 @@ export const LiveWorkbenchLoader: React.FC<{ traceJson: string }> = ({ traceJson
     // Start polling running test.
     pollTimer.current = setTimeout(async () => {
       try {
-        const model = await loadSingleTraceFile(traceJson);
-        setModel(model);
+        const update = await loadLiveTrace(traceJson, liveTrace.current);
+        if (update) {
+          liveTrace.current = update;
+          setModel(update.model);
+        }
       } catch {
         const model = new TraceModel('', []);
         setModel(model);
@@ -50,13 +55,3 @@ export const LiveWorkbenchLoader: React.FC<{ traceJson: string }> = ({ traceJson
 
   return <Workbench isLive={true} model={model} />;
 };
-
-async function loadSingleTraceFile(traceJson: string): Promise<TraceModel> {
-  const params = new URLSearchParams();
-  params.set('trace', traceJson);
-  // The trace grows: load its new lines on each poll.
-  params.set('reload', '1');
-  const response = await fetch(`contexts?${params.toString()}`);
-  const contextEntries = await response.json() as ContextEntry[];
-  return new TraceModel(traceJson, contextEntries);
-}

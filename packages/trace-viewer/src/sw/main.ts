@@ -235,7 +235,10 @@ async function doFetch(event: FetchEvent): Promise<Response> {
       return errorResponse;
 
     if (relativePath === '/contexts') {
-      return new Response(JSON.stringify(loadedTrace!.traceLoader.contextEntries), {
+      // A live poll passes the cursor of its last update, and gets only the changes since then.
+      const since = url.searchParams.get('since');
+      const contexts = since !== null ? loadedTrace!.traceLoader.contextsUpdate(since) : loadedTrace!.traceLoader.contextEntries;
+      return new Response(JSON.stringify(contexts), {
         status: 200,
         headers: { 'Content-Type': 'application/json' }
       });

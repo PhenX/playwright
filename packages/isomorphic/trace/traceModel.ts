@@ -96,6 +96,9 @@ export class TraceModel {
   private _domSnapshots = new Set<string>();
 
   constructor(traceUri: string, contexts: ContextEntry[]) {
+    // Move all times of library contexts to the time origin of the test runner. Do it first: the code
+    // below uses these times. The given contexts do not change: a live trace keeps them for the next update.
+    contexts = alignContextTimes(contexts);
     const libraryContext = contexts.find(context => context.origin === 'library' && context.browserName) || contexts.find(context => context.origin === 'library');
 
     this.traceUri = traceUri;
@@ -109,7 +112,6 @@ export class TraceModel {
     this.options = libraryContext?.options || {};
     this.testTimeout = contexts.find(c => c.origin === 'testRunner')?.testTimeout;
     this.annotations = contexts.find(c => c.origin === 'testRunner')?.annotations;
-    // Next call updates all timestamps for all events in library contexts, so it must be done first.
     this.actions = mergeActionsAndUpdateTiming(contexts);
     this.pages = ([] as PageEntry[]).concat(...contexts.map(c => c.pages));
     this.videos = [];
@@ -301,13 +303,6 @@ function mergeActionsAndUpdateTimingSameTrace(contexts: ContextEntry[]): ActionE
     }).flat();
   }
 
-  const timeOrigin = (context: ContextEntry) => context.wallTime - context.monotonicTime;
-  const runnerContext = testRunnerContexts.find(context => context.monotonicTime);
-  for (const context of libraryContexts) {
-    if (runnerContext && context.monotonicTime)
-      adjustMonotonicTime(context, timeOrigin(context) - timeOrigin(runnerContext));
-  }
-
   for (const context of libraryContexts) {
     for (const action of context.actions)
       map.set(action.callId, { ...action });
@@ -339,36 +334,43 @@ function mergeActionsAndUpdateTimingSameTrace(contexts: ContextEntry[]): ActionE
   return [...map.values()];
 }
 
-function adjustMonotonicTime(context: ContextEntry, monotonicTimeDelta: number) {
-  if (!monotonicTimeDelta)
-    return;
-  context.startTime += monotonicTimeDelta;
-  context.endTime += monotonicTimeDelta;
-  context.monotonicTime += monotonicTimeDelta;
-  for (const action of context.actions) {
-    if (action.startTime)
-      action.startTime += monotonicTimeDelta;
-    if (action.endTime)
-      action.endTime += monotonicTimeDelta;
-  }
-  for (const event of context.events)
-    event.time += monotonicTimeDelta;
-  for (const event of context.stdio)
-    event.timestamp += monotonicTimeDelta;
-  for (const page of context.pages) {
-    for (const frame of page.screencastFrames)
-      frame.timestamp += monotonicTimeDelta;
-  }
-  for (const video of context.videos || [])
-    video.timestamp += monotonicTimeDelta;
-  for (const screenshot of context.screenshots || [])
-    screenshot.timestamp += monotonicTimeDelta;
-  for (const ariaSnapshot of context.ariaSnapshots || [])
-    ariaSnapshot.timestamp += monotonicTimeDelta;
-  for (const resource of context.resources) {
-    if (resource._monotonicTime)
-      resource._monotonicTime += monotonicTimeDelta;
-  }
+function alignContextTimes(contexts: ContextEntry[]): ContextEntry[] {
+  const runnerContext = contexts.find(context => context.origin === 'testRunner' && context.monotonicTime);
+  if (!runnerContext)
+    return contexts;
+  const timeOrigin = (context: ContextEntry) => context.wallTime - context.monotonicTime;
+  return contexts.map(context => {
+    if (context.origin !== 'library' || !context.monotonicTime)
+      return context;
+    return adjustMonotonicTime(context, timeOrigin(context) - timeOrigin(runnerContext));
+  });
+}
+
+// Returns a copy of the context with all times moved, or the same context when the times do not move.
+function adjustMonotonicTime(context: ContextEntry, delta: number): ContextEntry {
+  if (!delta)
+    return context;
+  return {
+    ...context,
+    startTime: context.startTime + delta,
+    endTime: context.endTime + delta,
+    monotonicTime: context.monotonicTime + delta,
+    actions: context.actions.map(action => ({
+      ...action,
+      startTime: action.startTime ? action.startTime + delta : action.startTime,
+      endTime: action.endTime ? action.endTime + delta : action.endTime,
+    })),
+    events: context.events.map(event => ({ ...event, time: event.time + delta })),
+    stdio: context.stdio.map(event => ({ ...event, timestamp: event.timestamp + delta })),
+    pages: context.pages.map(page => ({
+      ...page,
+      screencastFrames: page.screencastFrames.map(frame => ({ ...frame, timestamp: frame.timestamp + delta })),
+    })),
+    videos: (context.videos || []).map(video => ({ ...video, timestamp: video.timestamp + delta })),
+    screenshots: (context.screenshots || []).map(screenshot => ({ ...screenshot, timestamp: screenshot.timestamp + delta })),
+    ariaSnapshots: (context.ariaSnapshots || []).map(ariaSnapshot => ({ ...ariaSnapshot, timestamp: ariaSnapshot.timestamp + delta })),
+    resources: context.resources.map(resource => resource._monotonicTime ? { ...resource, _monotonicTime: resource._monotonicTime + delta } : resource),
+  };
 }
 
 export function buildActionTree(actions: ActionEntry[]): { rootItem: ActionTreeItem, itemMap: Map<string, ActionTreeItem> } {

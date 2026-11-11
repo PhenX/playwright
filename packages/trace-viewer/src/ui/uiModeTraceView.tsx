@@ -20,9 +20,10 @@ import '@web/common.css';
 import '@web/third_party/vscode/codicon.css';
 import type * as reporterTypes from 'playwright/types/testReporter';
 import React from 'react';
-import type { ContextEntry } from '@isomorphic/trace/entries';
 import type { SourceLocation } from '@isomorphic/trace/traceModel';
 import { TraceModel } from '@isomorphic/trace/traceModel';
+import { loadLiveTrace } from './liveTrace';
+import type { LiveTrace } from './liveTrace';
 import { Workbench } from './workbench';
 
 export const TraceView: React.FC<{
@@ -35,10 +36,10 @@ export const TraceView: React.FC<{
 }> = ({ item, rootDir, onOpenExternally, revealSource, pathSeparator, onModelChange }) => {
   const [model, setModel] = React.useState<{ model: TraceModel, isLive: boolean } | undefined>(undefined);
   const [counter, setCounter] = React.useState(0);
-  // The contexts of the last live poll: a poll with the same contexts does not update the model.
-  const liveContexts = React.useRef<string | undefined>(undefined);
-  // The delay before the next live poll. A poll loads the whole trace, so it costs more as the trace
-  // grows: the delay grows with it, and a large trace updates less often.
+  // The contexts of the last live poll: the next poll gets only the changes.
+  const liveTrace = React.useRef<LiveTrace | undefined>(undefined);
+  // The delay before the next live poll. A poll builds a new model and renders it, so it costs more as the
+  // trace grows: the delay grows with it, and a large trace updates less often.
   const livePollDelay = React.useRef(kMinLivePollDelay);
 
   const { outputDir } = React.useMemo(() => {
@@ -59,7 +60,9 @@ export const TraceView: React.FC<{
     // Test finished.
     const attachment = result && result.duration >= 0 && result.attachments.find(a => a.name === 'trace');
     if (attachment && attachment.path) {
-      loadSingleTraceFile(attachment.path, result.startTime.getTime(), signal).then(model => model && setModel({ model, isLive: false })).catch(e => {
+      // The contexts of the live trace are no longer needed.
+      liveTrace.current = undefined;
+      loadSingleTraceFile(attachment.path, result.startTime.getTime(), signal).then(model => setModel({ model, isLive: false })).catch(e => {
         if (!signal.aborted)
           throw e;
       });
@@ -81,9 +84,11 @@ export const TraceView: React.FC<{
     const pollTimer = setTimeout(async () => {
       const pollStart = performance.now();
       try {
-        const model = await loadSingleTraceFile(traceLocation, result.startTime.getTime(), signal, liveContexts);
-        if (model)
-          setModel({ model, isLive: true });
+        const update = await loadLiveTrace(singleTraceFileUri(traceLocation, result.startTime.getTime()), liveTrace.current, signal);
+        if (update) {
+          liveTrace.current = update;
+          setModel({ model: update.model, isLive: true });
+        }
       } catch {
         if (signal.aborted)
           return;
@@ -135,21 +140,16 @@ const outputDirForTestCase = (testCase: reporterTypes.TestCase): string | undefi
   return undefined;
 };
 
-// With previousContexts, the trace is live. Its uri does not change while the test runs, so that the urls
-// of its resources and snapshots do not change between polls, and the reload parameter loads the new lines.
-async function loadSingleTraceFile(absolutePath: string, timestamp: number, signal: AbortSignal, previousContexts?: React.MutableRefObject<string | undefined>): Promise<TraceModel | undefined> {
-  const traceUri = `file?path=${encodeURIComponent(absolutePath)}&timestamp=${timestamp}`;
+// The uri of a live trace does not change while the test runs, so that the urls of its resources and snapshots
+// do not change between polls.
+function singleTraceFileUri(absolutePath: string, timestamp: number) {
+  return `file?path=${encodeURIComponent(absolutePath)}&timestamp=${timestamp}`;
+}
+
+async function loadSingleTraceFile(absolutePath: string, timestamp: number, signal: AbortSignal): Promise<TraceModel> {
+  const traceUri = singleTraceFileUri(absolutePath, timestamp);
   const params = new URLSearchParams();
   params.set('trace', traceUri);
-  if (previousContexts)
-    params.set('reload', '1');
   const response = await fetch(`contexts?${params.toString()}`, { signal });
-  const text = await response.text();
-  if (previousContexts) {
-    if (previousContexts.current === text)
-      return undefined;
-    previousContexts.current = text;
-  }
-  const contextEntries = JSON.parse(text) as ContextEntry[];
-  return new TraceModel(traceUri, contextEntries);
+  return new TraceModel(traceUri, await response.json());
 }

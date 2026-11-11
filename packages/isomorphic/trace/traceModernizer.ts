@@ -51,6 +51,8 @@ export class TraceModernizer {
   private _apiRequestRef: string | undefined;
   private _snapshotPhases = new Map<string, trace.ActionPhase>();
   private _legacyCallIdToStepId = new Map<string, string>();
+  // Live traces only: the call ids of the actions that were added or changed.
+  private _changedActions: Set<string> | undefined;
 
   constructor(contextEntry: ContextEntry, snapshotStorage: SnapshotStorage) {
     this._contextEntry = contextEntry;
@@ -70,12 +72,28 @@ export class TraceModernizer {
       return [this._legacyCallIdToStepId.get(callId) ?? callId, ...rest];
     });
     const callMetadata = parseClientSideCallMetadata({ files: data.files, stacks: normalized });
-    for (const action of this._actionMap.values())
-      action.stack = action.stack || callMetadata.get(action.callId);
+    for (const action of this._actionMap.values()) {
+      if (action.stack)
+        continue;
+      action.stack = callMetadata.get(action.callId);
+      if (action.stack)
+        this._changedActions?.add(action.callId);
+    }
   }
 
   actions(): ActionEntry[] {
     return [...this._actionMap.values()];
+  }
+
+  trackChangedActions() {
+    this._changedActions = new Set();
+  }
+
+  // Returns the call ids of the actions that were added or changed since the last call.
+  takeChangedActions(): Set<string> {
+    const result = this._changedActions!;
+    this._changedActions = new Set();
+    return result;
   }
 
   private _collectSnapshotPhase(snapshotName: string | undefined, phase: trace.ActionPhase) {
@@ -214,6 +232,8 @@ export class TraceModernizer {
         break;
       }
     }
+    if (this._changedActions && (event.type === 'before' || event.type === 'input' || event.type === 'log' || event.type === 'after' || event.type === 'action'))
+      this._changedActions.add(event.callId);
     // Make sure there is a page entry for each page, even without screencast frames,
     // to show in the metadata view.
     if (('pageId' in event) && event.pageId)
