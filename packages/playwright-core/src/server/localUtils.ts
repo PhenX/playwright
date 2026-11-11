@@ -69,7 +69,7 @@ export async function zip(progress: Progress, stackSessions: Map<string, StackSe
   };
 
   for (const entry of params.entries)
-    await addFile(entry.value, entry.name);
+    await progress.race(addFile(entry.value, entry.name));
 
   // Add stacks and the sources.
   const stackSession = params.stacksId ? stackSessions.get(params.stacksId) : undefined;
@@ -89,7 +89,7 @@ export async function zip(progress: Progress, stackSessions: Map<string, StackSe
         sourceFiles.add(file);
     }
     for (const sourceFile of sourceFiles)
-      await addFile(sourceFile, 'src/' + calculateSha1(sourceFile) + path.extname(sourceFile));
+      await progress.race(addFile(sourceFile, 'src/' + calculateSha1(sourceFile) + path.extname(sourceFile)));
   }
 
   if (params.mode === 'write') {
