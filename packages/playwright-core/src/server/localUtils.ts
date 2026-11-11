@@ -33,6 +33,9 @@ import type EventEmitter from 'events';
 import type { Progress } from './progress';
 
 
+const kMaxBufferedZipEntrySize = 1024 * 1024;
+const kMaxBufferedZipTotalSize = 64 * 1024 * 1024;
+
 export type StackSession = {
   file: string;
   writer: Promise<void>;
@@ -46,16 +49,27 @@ export async function zip(progress: Progress, stackSessions: Map<string, StackSe
   const zipFile = new yazl.ZipFile();
   (zipFile as any as EventEmitter).on('error', error => promise.reject(error));
 
-  const addFile = (file: string, name: string) => {
+  // A small file is read in memory and compressed in one call: this costs much less CPU
+  // than a compression stream for each file. The total size in memory has a limit.
+  let bufferedSize = 0;
+  const addFile = async (file: string, name: string) => {
     try {
-      if (fs.statSync(file).isFile())
+      const stat = await fs.promises.stat(file);
+      if (!stat.isFile())
+        return;
+      if (stat.size <= kMaxBufferedZipEntrySize && bufferedSize + stat.size <= kMaxBufferedZipTotalSize) {
+        const buffer = await fs.promises.readFile(file);
+        bufferedSize += buffer.length;
+        zipFile.addBuffer(buffer, name, { mtime: stat.mtime, mode: stat.mode });
+      } else {
         zipFile.addFile(file, name);
+      }
     } catch (e) {
     }
   };
 
   for (const entry of params.entries)
-    addFile(entry.value, entry.name);
+    await addFile(entry.value, entry.name);
 
   // Add stacks and the sources.
   const stackSession = params.stacksId ? stackSessions.get(params.stacksId) : undefined;
@@ -75,7 +89,7 @@ export async function zip(progress: Progress, stackSessions: Map<string, StackSe
         sourceFiles.add(file);
     }
     for (const sourceFile of sourceFiles)
-      addFile(sourceFile, 'src/' + calculateSha1(sourceFile) + path.extname(sourceFile));
+      await addFile(sourceFile, 'src/' + calculateSha1(sourceFile) + path.extname(sourceFile));
   }
 
   if (params.mode === 'write') {
