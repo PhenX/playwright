@@ -46,9 +46,16 @@ export type TreeViewProps<T> = {
   setTreeState: (treeState: TreeState) => void,
   autoExpandDepth?: number,
   revealSelectedKey?: number,
+  // With more visible items than this, only the rows near the visible area are rendered.
+  virtualizeAbove?: number,
 };
 
 const scrollPositions = new Map<string, number>();
+
+// A virtualized tree renders the rows in this distance from the visible area.
+const kVirtualOverscan = 600;
+// The height of a row that is not rendered yet.
+const kVirtualRowHeight = 28;
 
 export function TreeView<T extends TreeItem>({
   name,
@@ -68,6 +75,7 @@ export function TreeView<T extends TreeItem>({
   dataTestId,
   autoExpandDepth,
   revealSelectedKey,
+  virtualizeAbove,
 }: TreeViewProps<T>) {
   const treeItems = React.useMemo(() => {
     return indexTree<T>(rootItem, selectedItem, treeState.expandedItems, autoExpandDepth || 0, isVisible);
@@ -75,6 +83,8 @@ export function TreeView<T extends TreeItem>({
 
   const itemListRef = React.useRef<HTMLDivElement>(null);
   const [highlightedItem, setHighlightedItem] = React.useState<any>();
+  const virtualized = virtualizeAbove !== undefined && treeItems.size > virtualizeAbove;
+  const virtual = useVirtualRows(itemListRef, treeItems, virtualized, selectedItem, revealSelectedKey);
 
   React.useEffect(() => {
     onHighlighted?.(highlightedItem);
@@ -97,12 +107,13 @@ export function TreeView<T extends TreeItem>({
   }, [name]);
 
   React.useEffect(() => {
-    if (revealSelectedKey === undefined)
+    // A virtualized tree reveals the selected item itself, see useVirtualRows().
+    if (revealSelectedKey === undefined || virtualized)
       return;
     const selectedEl = itemListRef.current?.querySelector('[aria-selected="true"]');
     if (selectedEl)
       scrollIntoViewIfNeeded(selectedEl);
-  }, [revealSelectedKey]);
+  }, [revealSelectedKey, virtualized]);
 
   const toggleExpanded = React.useCallback((item: T) => {
     const { expanded } = treeItems.get(item)!;
@@ -198,11 +209,12 @@ export function TreeView<T extends TreeItem>({
       ref={itemListRef}
     >
       {noItemsMessage && treeItems.size === 0 && <div className='tree-view-empty'>{noItemsMessage}</div>}
-      {rootItem.children.map(child => {
-        const itemData = treeItems.get(child as T);
+      {virtual && <div style={{ height: virtual.topSpace, flex: 'none' }} />}
+      {(virtual ? virtual.rows : rootItem.children as T[]).map(child => {
+        const itemData = treeItems.get(child);
         return itemData && <TreeItemHeader
           key={child.id}
-          item={child as T}
+          item={child}
           treeItems={treeItems}
           selectedItem={selectedItem}
           onSelected={onSelected}
@@ -214,10 +226,131 @@ export function TreeView<T extends TreeItem>({
           setHighlightedItem={setHighlightedItem}
           render={render}
           icon={icon}
-          title={title} />;
+          title={title}
+          flat={!!virtual}
+          rowRef={virtual?.rowRef} />;
       })}
+      {virtual && <div style={{ height: virtual.bottomSpace, flex: 'none' }} />}
     </div>
   </div>;
+}
+
+type VirtualRows<T> = {
+  rows: T[],
+  topSpace: number,
+  bottomSpace: number,
+  rowRef: (id: string, element: HTMLElement | null) => void,
+};
+
+// Renders only the rows near the visible area, as a flat list. Rows can have different heights:
+// they are measured once rendered, and other rows count with an estimated height.
+function useVirtualRows<T extends TreeItem>(
+  containerRef: React.RefObject<HTMLDivElement | null>,
+  treeItems: Map<T, TreeItemData>,
+  enabled: boolean,
+  selectedItem: T | undefined,
+  revealSelectedKey: number | undefined): VirtualRows<T> | undefined {
+  const [viewport, setViewport] = React.useState({ top: 0, height: 0 });
+  const [measured, setMeasured] = React.useState(0);
+  const heights = React.useRef(new Map<string, number>());
+  const elements = React.useRef(new Map<string, HTMLElement>());
+
+  React.useEffect(() => {
+    const container = containerRef.current;
+    if (!enabled || !container)
+      return;
+    let frame = 0;
+    const update = () => {
+      frame = 0;
+      setViewport({ top: container.scrollTop, height: container.clientHeight });
+    };
+    const scheduleUpdate = () => {
+      if (!frame)
+        frame = requestAnimationFrame(update);
+    };
+    update();
+    container.addEventListener('scroll', scheduleUpdate, { passive: true });
+    const resizeObserver = new ResizeObserver(scheduleUpdate);
+    resizeObserver.observe(container);
+    return () => {
+      container.removeEventListener('scroll', scheduleUpdate);
+      resizeObserver.disconnect();
+      cancelAnimationFrame(frame);
+    };
+  }, [enabled, containerRef]);
+
+  const allRows = React.useMemo(() => enabled ? [...treeItems.keys()] : [], [enabled, treeItems]);
+  const offsets = React.useMemo(() => {
+    const result = new Array<number>(allRows.length + 1);
+    result[0] = 0;
+    for (let i = 0; i < allRows.length; i++)
+      result[i + 1] = result[i] + (heights.current.get(allRows[i].id) ?? kVirtualRowHeight);
+    return result;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allRows, measured]);
+
+  // Measure the rendered rows. A change of height updates the offsets once.
+  React.useLayoutEffect(() => {
+    if (!enabled)
+      return;
+    let changed = false;
+    for (const [id, element] of elements.current) {
+      const height = element.offsetHeight;
+      if (height && heights.current.get(id) !== height) {
+        heights.current.set(id, height);
+        changed = true;
+      }
+    }
+    if (changed)
+      setMeasured(value => value + 1);
+  }, [enabled, allRows, viewport, measured]);
+
+  // Scroll to the selected row, so that it is rendered. The row itself then scrolls into view when needed.
+  const selectedIndex = enabled && selectedItem ? allRows.indexOf(selectedItem) : -1;
+  React.useEffect(() => {
+    const container = containerRef.current;
+    if (!container || selectedIndex === -1)
+      return;
+    const top = offsets[selectedIndex];
+    const bottom = offsets[selectedIndex + 1];
+    if (top < container.scrollTop)
+      container.scrollTop = top;
+    else if (bottom > container.scrollTop + container.clientHeight)
+      container.scrollTop = bottom - container.clientHeight;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedItem?.id, revealSelectedKey]);
+
+  const rowRef = React.useCallback((id: string, element: HTMLElement | null) => {
+    if (element)
+      elements.current.set(id, element);
+    else
+      elements.current.delete(id);
+  }, []);
+
+  if (!enabled)
+    return undefined;
+  const start = Math.max(0, upperBound(offsets, viewport.top - kVirtualOverscan) - 1);
+  const end = Math.min(allRows.length, upperBound(offsets, viewport.top + viewport.height + kVirtualOverscan));
+  return {
+    rows: allRows.slice(start, end),
+    topSpace: offsets[start],
+    bottomSpace: offsets[allRows.length] - offsets[end],
+    rowRef,
+  };
+}
+
+// The index of the first offset that is greater than the value.
+function upperBound(offsets: number[], value: number): number {
+  let low = 0;
+  let high = offsets.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (offsets[middle] <= value)
+      low = middle + 1;
+    else
+      high = middle;
+  }
+  return low;
 }
 
 type TreeItemHeaderProps<T> = {
@@ -234,6 +367,9 @@ type TreeItemHeaderProps<T> = {
   render: (item: T) => React.ReactNode,
   title?: (item: T) => string,
   icon?: (item: T) => string | undefined,
+  // A flat row does not render its children: the virtualized tree renders all rows as a list.
+  flat?: boolean,
+  rowRef?: (id: string, element: HTMLElement | null) => void,
 };
 
 export function TreeItemHeader<T extends TreeItem>({
@@ -249,9 +385,11 @@ export function TreeItemHeader<T extends TreeItem>({
   toggleSubtree,
   render,
   title,
-  icon }: TreeItemHeaderProps<T>) {
+  icon,
+  flat,
+  rowRef }: TreeItemHeaderProps<T>) {
   const groupId = React.useId();
-  const itemRef = React.useRef(null);
+  const itemRef = React.useRef<HTMLDivElement | null>(null);
 
   React.useEffect(() => {
     if (selectedItem?.id === item.id && itemRef.current)
@@ -265,11 +403,24 @@ export function TreeItemHeader<T extends TreeItem>({
   if (typeof expanded === 'boolean')
     expandIcon = expanded ? 'codicon-chevron-down' : 'codicon-chevron-right';
   const rendered = render(item);
-  const children = expanded && item.children.length ? item.children as T[] : [];
+  const children = !flat && expanded && item.children.length ? item.children as T[] : [];
   const titled = title?.(item);
   const iconed = icon?.(item) || 'codicon-blank';
+  const setElement = (element: HTMLDivElement | null) => {
+    itemRef.current = element;
+    rowRef?.(item.id, element);
+  };
 
-  return <div ref={itemRef} role='treeitem' aria-selected={item === selectedItem} aria-expanded={expanded} aria-controls={groupId} title={titled} className='vbox' style={{ flex: 'none' }}>
+  return <div
+    ref={setElement}
+    role='treeitem'
+    aria-selected={item === selectedItem}
+    aria-expanded={expanded}
+    aria-controls={flat ? undefined : groupId}
+    aria-level={flat ? indentation + 1 : undefined}
+    title={titled}
+    className='vbox'
+    style={{ flex: 'none' }}>
     <div
       onDoubleClick={() => onAccepted?.(item)}
       className={clsx(

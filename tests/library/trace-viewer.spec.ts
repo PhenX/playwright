@@ -1066,6 +1066,23 @@ test('TV-138 should show new actions of a live trace', async ({ browserType, sho
   await browser.close();
 });
 
+test('TV-139 should render only the visible rows of a long action list', async ({ page, runAndTrace }) => {
+  const traceViewer = await runAndTrace(async () => {
+    await page.setContent('<div>content</div>');
+    for (let i = 0; i < 600; i++)
+      await page.locator(`#item-${i}`).count();
+  });
+
+  const content = traceViewer.actionsTree.locator('.tree-view-content');
+  await expect(traceViewer.actionsTree.getByRole('treeitem').first()).toBeVisible();
+  expect(await traceViewer.actionsTree.getByRole('treeitem').count()).toBeLessThan(100);
+
+  await content.evaluate(e => e.scrollTop = 0);
+  await expect(traceViewer.actionsTree.getByRole('treeitem', { name: /#item-0'/ })).toBeVisible();
+  await content.evaluate(e => e.scrollTop = e.scrollHeight);
+  await expect(traceViewer.actionsTree.getByRole('treeitem', { name: /#item-599'/ })).toBeVisible();
+});
+
 test('TV-048 should restore scroll positions', async ({ page, runAndTrace }) => {
   const traceViewer = await runAndTrace(async () => {
     await page.setContent(`

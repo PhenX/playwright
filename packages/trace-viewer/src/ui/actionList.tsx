@@ -49,6 +49,8 @@ export interface ActionListProps {
 }
 
 const ActionTreeView = TreeView<ActionTreeItem>;
+// Long action lists, for example of a long live test, render only the rows near the visible area.
+const kVirtualizeActionsAbove = 500;
 
 export const ActionList: React.FC<ActionListProps> = ({
   actions,
@@ -154,6 +156,7 @@ export const ActionList: React.FC<ActionListProps> = ({
       render={render}
       autoExpandDepth={actionFilterText?.trim() ? 5 : 0}
       revealSelectedKey={showAllCounter}
+      virtualizeAbove={kVirtualizeActionsAbove}
     />
   </div>;
 };
