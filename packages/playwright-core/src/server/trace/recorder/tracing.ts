@@ -792,7 +792,8 @@ export class Tracing extends SdkObject implements InstrumentationListener, Snaps
   }
 
   private _appendTraceEvent(event: trace.TraceEvent) {
-    const visited = visitTraceEvent(event);
+    // A frame snapshot holds only plain data from the page, and it can be large.
+    const visited = event.type === 'frame-snapshot' ? event : visitTraceEvent(event);
     // Do not flush (console) events, they are too noisy, unless we are in ui mode (live).
     const flush = this._state!.options.live || (event.type !== 'event' && event.type !== 'console' && event.type !== 'log');
     this._fs.appendFile(this._state!.traceFile, JSON.stringify(visited) + '\n', flush);
