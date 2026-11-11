@@ -98,6 +98,12 @@ function loadTrace(clientId: string, url: URL, progress: Progress): Promise<Load
 
   clientIdToTraceUrls.set(clientId, traceUri);
   const loadedTrace = loadedTraces.get(traceUri);
+  if (loadedTrace && url.searchParams.has('reload')) {
+    // A live trace grows while the test runs. Other requests use the previous load until this one is ready.
+    const promise = innerLoadTrace(traceUri, progress);
+    promise.then(() => loadedTraces.set(traceUri, promise), () => {});
+    return promise;
+  }
   if (loadedTrace)
     return loadedTrace;
   const promise = innerLoadTrace(traceUri, progress);
