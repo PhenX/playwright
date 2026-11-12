@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+import fs from 'fs';
+
 import mime from 'mime';
 import { monotonicTime } from '@isomorphic/time';
 import { calculateSha1, createGuid } from '@utils/crypto';
@@ -94,7 +96,9 @@ export class Snapshotter {
     ];
 
     const { javaScriptEnabled } = this._context._options;
-    const initScriptSource = `(${frameSnapshotStreamer})("${this._snapshotStreamer}", ${javaScriptEnabled || javaScriptEnabled === undefined})`;
+    // Tests only: compare each snapshot with a full walk, and append the differences to this file.
+    const check = !!process.env.PWTEST_SNAPSHOT_CHECK;
+    const initScriptSource = `(${frameSnapshotStreamer})("${this._snapshotStreamer}", ${javaScriptEnabled || javaScriptEnabled === undefined}, ${check})`;
     this._initScript = await this._context.addInitScript(progress, initScriptSource);
     await progress.race(this._context.safeNonStallingEvaluateInAllFrames(initScriptSource, 'main'));
   }
@@ -127,6 +131,8 @@ export class Snapshotter {
       // Something went wrong -> bail out, our snapshots are best-efforty.
       if (!data || !this._started)
         return;
+      if (data.checkError)
+        fs.appendFileSync(process.env.PWTEST_SNAPSHOT_CHECK!, JSON.stringify({ url: data.url, callId, phase, error: data.checkError }) + '\n');
 
       const snapshot: FrameSnapshot = {
         callId,
