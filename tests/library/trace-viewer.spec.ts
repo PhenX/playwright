@@ -1077,6 +1077,47 @@ test('TV-048 should restore scroll positions', async ({ page, runAndTrace }) => 
   expect(await frame.locator('div').evaluate(div => div.scrollTop)).toBe(136);
 });
 
+test('TV-137 should capture changes between snapshots', async ({ page, runAndTrace, server }) => {
+  const traceViewer = await runAndTrace(async () => {
+    await page.goto(server.EMPTY_PAGE);
+    await page.setContent(`
+      <style id=style>.tall { height: 400px }</style>
+      <input id=text value=old>
+      <div id=scroller style="height: 40px; overflow: auto"><div class=tall>tall</div></div>
+      <div id=later style="height: 40px"><div class=tall>later</div></div>
+      <ul><li id=item>item</li></ul>
+      <div id=host></div>
+      <button>Done</button>
+    `);
+    await page.click('#text');
+    // None of these changes is a mutation in the observed DOM.
+    await page.evaluate(() => {
+      document.querySelector<HTMLInputElement>('#text')!.value = 'set by script';
+      document.querySelector('#scroller')!.scrollTop = 40;
+      // A style change makes the element scrollable, and it scrolls before the browser fires a scroll event.
+      document.querySelector<HTMLStyleElement>('#style')!.sheet!.insertRule('#later { overflow: auto }');
+      document.querySelector('#later')!.scrollTop = 30;
+      (window as any).item = document.querySelector('#item');
+      (window as any).item.remove();
+    });
+    await page.evaluate(() => {
+      (window as any).item.textContent = 'changed while detached';
+      document.querySelector('ul')!.append((window as any).item);
+      document.querySelector('#host')!.attachShadow({ mode: 'open' }).innerHTML = '<span>in shadow</span>';
+      history.pushState({}, '', '/sub/page');
+    });
+    await page.click('button');
+  });
+
+  const frame = await traceViewer.snapshotFrame('Click', 1);
+  await expect(frame.locator('#text')).toHaveValue('set by script');
+  await expect(frame.locator('#item')).toHaveText('changed while detached');
+  await expect(frame.locator('#host span')).toHaveText('in shadow');
+  await expect(frame.locator('base')).toHaveAttribute('href', /\/sub\/page$/);
+  expect(await frame.locator('#scroller').evaluate(e => e.scrollTop)).toBe(40);
+  expect(await frame.locator('#later').evaluate(e => e.scrollTop)).toBe(30);
+});
+
 test('TV-049 should restore control values', async ({ page, runAndTrace, asset }) => {
   const traceViewer = await runAndTrace(async () => {
     await page.setContent(`

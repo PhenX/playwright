@@ -56,7 +56,19 @@ type BrowserTestTestFixtures = PageTestFixtures & {
 
 type ContextFactory = (options?: BrowserContextOptions) => Promise<{ context: BrowserContext, close: () => Promise<void> }>;
 
-const test = baseTest.extend<BrowserTestTestFixtures & { _contextFactory: ContextFactory }, BrowserTestWorkerFixtures>({
+const test = baseTest.extend<BrowserTestTestFixtures & { _contextFactory: ContextFactory, _snapshotCheck: void }, BrowserTestWorkerFixtures>({
+  // Compares each DOM snapshot of a trace with a full walk of the page, see snapshotterInjected.ts.
+  // A difference fails the test.
+  _snapshotCheck: [async ({}, use, testInfo) => {
+    const file = testInfo.outputPath('snapshot-check.jsonl');
+    await fs.promises.mkdir(path.dirname(file), { recursive: true });
+    process.env.PWTEST_SNAPSHOT_CHECK = file;
+    await use();
+    delete process.env.PWTEST_SNAPSHOT_CHECK;
+    if (fs.existsSync(file))
+      throw new Error(`A DOM snapshot is different from a full walk:\n${fs.readFileSync(file, 'utf8')}`);
+  }, { auto: true }],
+
   browserVersion: [async ({ browser }, run) => {
     await run(browser.version());
   }, { scope: 'worker' }],
