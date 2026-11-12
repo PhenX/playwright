@@ -62,6 +62,8 @@ test('TR-001 should collect trace with resources, but no js', async ({ context, 
   const script = events.find(e => e.type === 'resource-snapshot' && e.snapshot.request.url.endsWith('script.js'));
   expect(script).toBeTruthy();
   expect(script.snapshot.response.content._file).toBe(undefined);
+  // The trace does not fetch the body of a script, but still records its size.
+  expect(script.snapshot.response.bodySize).toBeGreaterThan(0);
 });
 
 test('TR-002 should use the correct title for event driven callbacks', async ({ context, page, server }, testInfo) => {

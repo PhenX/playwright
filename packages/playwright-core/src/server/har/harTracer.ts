@@ -374,8 +374,12 @@ export class HarTracer {
     if (compressionCalculationBarrier)
       this._addBarrier(page || request.serviceWorker(), compressionCalculationBarrier.barrier);
 
-    const promise = response.internalBody().then(buffer => {
-      if (this._options.omitScripts && request.resourceType() === 'script') {
+    // The body of an omitted script is not stored, so do not fetch it. Its entry waits for its sizes instead:
+    // the callback that sets them is added below to the same promise, and runs before this chain continues.
+    const sizesPromise = this._options.omitSizes ? undefined : response.internalSizes();
+    const omitBody = this._options.omitScripts && request.resourceType() === 'script';
+    const promise = (omitBody ? Promise.resolve(sizesPromise).then(() => undefined) : response.internalBody()).then(buffer => {
+      if (!buffer) {
         compressionCalculationBarrier?.setDecodedBodySize(0);
         return;
       }
@@ -401,8 +405,8 @@ export class HarTracer {
     harEntry.timings.receive = response.request()._responseEndTiming !== -1 ? helper.millisToRoundishMillis(response.request()._responseEndTiming - timing.responseStart) : -1;
     this._computeHarEntryTotalTime(harEntry);
 
-    if (!this._options.omitSizes) {
-      this._addBarrier(page || request.serviceWorker(), response.internalSizes().then(sizes => {
+    if (sizesPromise) {
+      this._addBarrier(page || request.serviceWorker(), sizesPromise.then(sizes => {
         harEntry.response.bodySize = sizes.responseBodySize;
         harEntry.response.headersSize = sizes.responseHeadersSize;
         harEntry.response._transferSize = sizes.transferSize;
