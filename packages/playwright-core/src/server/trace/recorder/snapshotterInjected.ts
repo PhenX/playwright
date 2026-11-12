@@ -98,7 +98,20 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
   function ensureNodeData(node: Node): CachedData {
     let data = nodeData(node);
     if (!data) {
-      data = { historyEpoch };
+      // All fields in the same order, so that the JS engine uses one object shape for all nodes.
+      data = {
+        historyEpoch,
+        dirtyEpoch: 0,
+        insertedEpoch: 0,
+        cached: undefined,
+        ref: undefined,
+        attributesCached: undefined,
+        volatileValues: undefined,
+        scrollTop: 0,
+        scrollLeft: 0,
+        shadowRoot: null,
+        adoptedStyleSheets: undefined,
+      };
       (node as any)[kCachedData] = data;
     }
     return data;
