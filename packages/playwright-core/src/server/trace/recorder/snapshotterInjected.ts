@@ -442,7 +442,8 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
     }
 
     // Marks the nodes with changes that a MutationObserver does not report.
-    private _markChangesWithoutMutations() {
+    // Without `incremental`, the snapshot visits all elements, so it does not need the scroll pass.
+    private _markChangesWithoutMutations(incremental: boolean) {
       for (const element of this._volatileElements) {
         if (!element.isConnected) {
           this._volatileElements.delete(element);
@@ -475,7 +476,7 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
       // and the browser does not fire an event before the snapshot in all cases. A full walk reads
       // them on every element, so read them on every element too. This is the largest part of an
       // incremental snapshot.
-      if (document.documentElement && nodeData(document.documentElement)?.ref) {
+      if (incremental && document.documentElement && nodeData(document.documentElement)?.ref) {
         this._markScrollAndShadowRootChanges(document.getElementsByTagName('*'));
         for (const shadowRoot of this._shadowRoots)
           this._markScrollAndShadowRootChanges(shadowRoot.querySelectorAll('*'));
@@ -605,7 +606,9 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
       }
     }
 
-    captureSnapshot(reset?: 'history' | 'targets'): SnapshotData | undefined {
+    // Without `incremental`, the snapshot visits all nodes, like before incremental snapshots.
+    // The result is the same.
+    captureSnapshot(reset?: 'history' | 'targets', incremental = true): SnapshotData | undefined {
       const timestamp = performance.now();
       const snapshotNumber = ++this._lastSnapshotNumber;
       this._ensureObservingCurrentDocument();
@@ -621,7 +624,7 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
 
       // Ensure we are up to date.
       this._handleMutations(this._observer.takeRecords());
-      this._markChangesWithoutMutations();
+      this._markChangesWithoutMutations(incremental);
       // Nodes that change from now on are marked for the next snapshot.
       const markEpoch = this._markEpoch++;
 
@@ -915,7 +918,7 @@ export function frameSnapshotStreamer(snapshotStreamer: string, removeNoScript: 
 
       let html: NodeSnapshot;
       if (document.documentElement) {
-        const { n } = visitNode(document.documentElement, this._fullWalks)!;
+        const { n } = visitNode(document.documentElement, this._fullWalks || !incremental)!;
         html = n;
       } else {
         html = ['html'];

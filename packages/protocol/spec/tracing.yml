@@ -25,6 +25,7 @@ Tracing:
         snapshotDom: boolean?
         snapshotAria: boolean?
         snapshotScreen: boolean?
+        snapshotIncremental: boolean?
         screencast: boolean?
         coverage: boolean?
         live: boolean?

@@ -154,6 +154,7 @@ a timeline preview.
   - `dom` ?<[boolean]> Capture DOM snapshot on every action and record network activity. Optional.
   - `aria` ?<[boolean]> Capture aria snapshot of the page on every action. Optional.
   - `screen` ?<[boolean]> Capture a screenshot of the page on every action. Optional.
+  - `incremental` ?<[boolean]> Whether a DOM snapshot visits only the nodes that changed since the previous snapshot. The snapshot is the same as with a visit of all nodes, so turn it off only to find a problem. Defaults to `true`. Optional.
 
 Which snapshots to capture on every action. Passing `true` is a shortcut for `{ dom: true }`.
 

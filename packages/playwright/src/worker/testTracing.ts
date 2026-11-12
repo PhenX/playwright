@@ -38,7 +38,7 @@ const version: trace.VERSION = 10;
 let traceOrdinal = 0;
 
 type TraceFixtureValue =  PlaywrightWorkerOptions['trace'] | undefined;
-type TraceOptions = { screenshots: boolean, snapshots: boolean | { dom?: boolean, aria?: boolean, screen?: boolean }, _coverage: boolean, sources: boolean, attachments: boolean, live: boolean, mode: TraceMode };
+type TraceOptions = { screenshots: boolean, snapshots: boolean | { dom?: boolean, aria?: boolean, screen?: boolean, incremental?: boolean }, _coverage: boolean, sources: boolean, attachments: boolean, live: boolean, mode: TraceMode };
 
 export class TestTracing {
   private _testInfo: TestInfoImpl;

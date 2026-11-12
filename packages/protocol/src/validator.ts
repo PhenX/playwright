@@ -3159,6 +3159,7 @@ scheme.TracingTracingStartParams = tObject({
   snapshotDom: tOptional(tBoolean),
   snapshotAria: tOptional(tBoolean),
   snapshotScreen: tOptional(tBoolean),
+  snapshotIncremental: tOptional(tBoolean),
   screencast: tOptional(tBoolean),
   coverage: tOptional(tBoolean),
   live: tOptional(tBoolean),

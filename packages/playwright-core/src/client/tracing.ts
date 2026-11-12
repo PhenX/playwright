@@ -43,7 +43,7 @@ export class Tracing extends ChannelOwner<channels.TracingChannel> implements ap
   }
 
   @apiCall()
-  async start(options: { name?: string, title?: string, snapshots?: boolean | { dom?: boolean, aria?: boolean, screen?: boolean }, screenshots?: boolean, _coverage?: boolean, sources?: boolean, live?: boolean } = {}) {
+  async start(options: { name?: string, title?: string, snapshots?: boolean | { dom?: boolean, aria?: boolean, screen?: boolean, incremental?: boolean }, screenshots?: boolean, _coverage?: boolean, sources?: boolean, live?: boolean } = {}) {
     this._includeSources = !!options.sources;
     this._isLive = !!options.live;
     const snapshots = typeof options.snapshots === 'object' ? options.snapshots : { dom: options.snapshots };
@@ -52,6 +52,7 @@ export class Tracing extends ChannelOwner<channels.TracingChannel> implements ap
       snapshotDom: snapshots.dom,
       snapshotAria: snapshots.aria,
       snapshotScreen: snapshots.screen,
+      snapshotIncremental: snapshots.incremental,
       screencast: options.screenshots,
       coverage: options._coverage,
       live: options.live,

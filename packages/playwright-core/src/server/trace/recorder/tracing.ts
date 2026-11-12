@@ -63,6 +63,8 @@ export type TracerOptions = {
   snapshotDom?: boolean;
   snapshotAria?: boolean;
   snapshotScreen?: boolean;
+  // DOM snapshots visit only the nodes that changed, unless this is false.
+  snapshotIncremental?: boolean;
   screencast?: boolean;
   coverage?: boolean;
   live?: boolean;
@@ -517,7 +519,8 @@ export class Tracing extends SdkObject implements InstrumentationListener, Snaps
       // Node references are only reset by the first snapshot of the action.
       const resetTargets = phase === 'before';
       try {
-        await progress.race(this._snapshotter.captureSnapshot(page, progress.metadata.id, phase, resetTargets));
+        const incremental = this._state?.options.snapshotIncremental !== false;
+        await progress.race(this._snapshotter.captureSnapshot(page, progress.metadata.id, phase, resetTargets, incremental));
       } catch {
       }
     }

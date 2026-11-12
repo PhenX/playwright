@@ -23721,6 +23721,12 @@ export interface Tracing {
        * Capture a screenshot of the page on every action. Optional.
        */
       screen?: boolean;
+
+      /**
+       * Whether a DOM snapshot visits only the nodes that changed since the previous snapshot. The snapshot is the same as
+       * with a visit of all nodes, so turn it off only to find a problem. Defaults to `true`. Optional.
+       */
+      incremental?: boolean;
     };
 
     /**
