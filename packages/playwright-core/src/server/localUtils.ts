@@ -46,9 +46,17 @@ export async function zip(progress: Progress, stackSessions: Map<string, StackSe
   const zipFile = new yazl.ZipFile();
   (zipFile as any as EventEmitter).on('error', error => promise.reject(error));
 
+  // A small file costs much less CPU to compress in one call than with a stream, for example the
+  // screencast frames. The total size of the files that are read in memory has a limit.
+  let bufferedSize = 0;
   const addFile = (file: string, name: string) => {
     try {
-      if (fs.statSync(file).isFile())
+      const stat = fs.statSync(file);
+      if (!stat.isFile())
+        return;
+      if (stat.size <= 1024 * 1024 && (bufferedSize += stat.size) <= 64 * 1024 * 1024)
+        zipFile.addBuffer(fs.readFileSync(file), name, { mtime: stat.mtime, mode: stat.mode });
+      else
         zipFile.addFile(file, name);
     } catch (e) {
     }
